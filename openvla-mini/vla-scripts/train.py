@@ -18,6 +18,7 @@ Run with:
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Tuple, Union
@@ -26,6 +27,11 @@ import draccus
 import torch
 import torch.distributed as dist
 import yaml
+
+# Make local package imports robust when launching from subdirectories.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from prismatic.conf import VLAConfig, VLARegistry
 from prismatic.models import load, load_vla
