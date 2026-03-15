@@ -1,0 +1,21 @@
+# train_config.yaml
+
+# --- Global Paths & Logging ---
+run_root_dir: "/home/hk-project-p0024638/uvrfq/hkfswork/minivla_reasoning_run_dir"
+data_root_dir: "/home/hk-project-p0024638/uvrfq/hkfswork/ecot-lite_data"
+wandb_project: "mini-vla-libero-reasoning"
+wandb_entity: "ambrosius-karlsruhe-institute-of-technology"
+
+# Action chunking
+# --- VLA Configuration ---
+vla:
+  type: "prism-qwen25-dinosiglip-224px+0_5b+mx-libero-lm-90"
+  data_mix: "libero_lm_90"
+  
+  expected_world_size: 8
+  per_device_batch_size: 16
+  global_batch_size: 128
+
+  max_steps: 200000
+
+  action_tokenizer: "libero_vq_action_tokenizer_10_future"
