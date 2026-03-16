@@ -67,9 +67,7 @@ class GenerateConfig:
     #################################################################################################################
     model_family: str = "minivla"                    # Model family
     hf_token: str = Path(".hf_token")                       # Model family
-    pretrained_checkpoint: Union[str, Path] = "/home/hk-project-p0024638/uvrfq/hkfswork/minivla_reasoning_run_dir/prism-qwen25-dinosiglip-224px+0_5b+mx-libero-90+n1+b16+x7/checkpoints/step-200000-epoch-45-loss=0.0143.pt"     # Pretrained checkpoint path
-    #pretrained_checkpoint: Union[str, Path] = "/home/hk-project-p0024638/uvrfq/hkfswork/minivla_reasoning_run_dir/copy_prism-qwen25-dinosiglip-224px+0_5b+mx-libero-90+n1+b16+x7/checkpoints/step-200000-epoch-45-loss=0.0197.pt"     # Pretrained checkpoint path
-    load_in_8bit: bool = False                       # (For OpenVLA only) Load with 8-bit quantization
+    pretrained_checkpoint: Union[str, Path] = "/home/hk-project-p0024638/uvrfq/hkfswork/minivla_reasoning_run_dir/prism-qwen25-dinosiglip-224px+0_5b+mx-libero-lm-90+n1+b16+x7/checkpoints/step-200000-epoch-45-loss=0.0165.pt"
     load_in_4bit: bool = False                       # (For OpenVLA only) Load with 4-bit quantization
 
     center_crop: bool = False                         # Center crop? (if trained w/ random crop image aug)
@@ -79,10 +77,9 @@ class GenerateConfig:
     #################################################################################################################
     # LIBERO environment-specific parameters
     #################################################################################################################
-    task_suite_name: str = "libero_90"          # Task suite.
-    #                                       Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
+    task_suite_name: str = "libero_90"          # Task suite.                                      Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     num_steps_wait: int = 10                         # Number of steps to wait for objects to stabilize in sim
-    num_trials_per_task: int = 1                    # Number of rollouts per task
+    num_trials_per_task: int = 20                    # Number of rollouts per task
 
     #################################################################################################################
     # Utils
@@ -106,6 +103,7 @@ class GenerateConfig:
     save_metrics_json: bool = True                   # Save per-run metrics to JSON for easy aggregation
 
     
+    rollout_dir_name: Optional[str] = None             # Optional name of the rollout directory
     reasoning_modifier_fn_str: str = "None"
     # fmt: on
 
@@ -360,7 +358,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
             # Save a replay video of the episode
             rollout_idx = task_id * cfg.num_trials_per_task + episode_idx + 1
             save_rollout_video(
-                replay_images_annotated, rollout_idx, success=done, task_description=task_description, log_file=log_file
+                replay_images_annotated, rollout_idx, success=done, task_description=task_description, log_file=log_file, rollout_dir_name=cfg.rollout_dir_name
             )
 
             # Save the videos to wandb
