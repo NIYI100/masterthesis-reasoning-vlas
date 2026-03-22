@@ -28,36 +28,61 @@ def draw_cot(reasoning, action, obs, include_keys=None):
     return annotated_img
 
 def get_metadata(reasoning):
-    metadata = {"gripper": [[-20, -20]], "bboxes": dict()}
+    metadata = {"gripper": [], "bboxes": dict()}
 
     gripper_key = f"{CotTag.GRIPPER_POSITION.value}"
     objects_key = f"{CotTag.VISIBLE_OBJECTS.value}"
 
     if gripper_key in reasoning:
         gripper_str = reasoning[gripper_key].strip()
-        try:
-            gripper_pos = ast.literal_eval(gripper_str)
-            metadata["gripper"] = [(gripper_pos[2 * i], gripper_pos[2 * i + 1]) for i in range(len(gripper_pos) // 2)]
-        except (ValueError, SyntaxError):
-            pass
+        if gripper_str:
+            try:
+                gripper_pos = ast.literal_eval(gripper_str)
+                pairs = [
+                    (gripper_pos[2 * i], gripper_pos[2 * i + 1])
+                    for i in range(len(gripper_pos) // 2)
+                ]
+                if pairs:
+                    metadata["gripper"] = pairs
+            except (ValueError, SyntaxError, TypeError):
+                pass
 
     if objects_key in reasoning:
         objects_str = reasoning[objects_key].strip()
-        try:
-            metadata["bboxes"] = ast.literal_eval(objects_str)
-        except (ValueError, SyntaxError):
-            pass
+        if objects_str:
+            try:
+                parsed = ast.literal_eval(objects_str)
+                if isinstance(parsed, dict) and parsed:
+                    metadata["bboxes"] = parsed
+            except (ValueError, SyntaxError):
+                pass
 
     return metadata
 
+def _sanitize_gripper_points(pos_list):
+    """Convert parsed gripper pairs to integer pixel coordinates; drop invalid entries."""
+    out = []
+    for pos in pos_list:
+        try:
+            x = int(round(float(pos[0])))
+            y = int(round(float(pos[1])))
+        except (TypeError, ValueError, IndexError):
+            continue
+        out.append((x, y))
+    return out
+
+
 def draw_annotations(image_array, metadata, action_vector, img_size=(640, 480)):
     img = np.ascontiguousarray(image_array)
-    gripper_pos = metadata["gripper"]
-    bbs = metadata["bboxes"]
-    draw_gripper(img, gripper_pos, img_size)
-    draw_bboxes(img, bbs, img_size)
-    draw_action(img, gripper_pos, action_vector)
-        
+    gripper_pos = _sanitize_gripper_points(metadata["gripper"])
+    bbs = metadata["bboxes"] if isinstance(metadata.get("bboxes"), dict) else {}
+
+    if bbs:
+        draw_bboxes(img, bbs, img_size)
+    if gripper_pos:
+        draw_gripper(img, gripper_pos, img_size)
+        draw_action(img, gripper_pos, action_vector)
+
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 def draw_gripper(img, pos_list, img_size=(640, 480)):
@@ -69,21 +94,23 @@ def draw_gripper(img, pos_list, img_size=(640, 480)):
 
 def draw_bboxes(img, bboxes, img_size=(640, 480)):
     for name, bbox in bboxes.items():
-        show_name = name
-        # show_name = f'{name}; {str(bbox)}'
-
+        try:
+            x1, y1 = int(bbox[0][0]), int(bbox[0][1])
+            x2, y2 = int(bbox[1][0]), int(bbox[1][1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        show_name = str(name)
         cv2.rectangle(
             img,
-            ((bbox[0][0], bbox[0][1])),
-            ((bbox[1][0], bbox[1][1])),
+            (x1, y1),
+            (x2, y2),
             name_to_random_color(name),
             1,
         )
-        
         cv2.putText(
             img,
             show_name,
-            (bbox[0][0], bbox[0][1] + 6),
+            (x1, y1 + 6),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
             (255, 255, 255),
