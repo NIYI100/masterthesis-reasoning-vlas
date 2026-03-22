@@ -30,7 +30,7 @@ import numpy as np
 import tqdm
 
 sys.path.append("/home/hk-project-p0024638/uvrfq/LIBERO")
-from libero.libero import benchmark
+from libero.libero import benchmark, get_libero_path
 
 from prismatic.util.draw_cot import draw_cot
 from prismatic.util.reasoning_manipulation import *
@@ -40,13 +40,29 @@ import wandb
 # Append current directory so that interpreter can find experiments.robot
 sys.path.append("../../")
 from experiments.robot.libero.libero_utils import (
+    apply_perturbation_to_env,
+    create_bddl_with_distractors,
+    extract_gt_bboxes_from_obs,
+    extract_gt_gripper_pixel_from_obs,
     get_libero_dummy_action,
     get_libero_env,
     get_libero_image,
     quat2axisangle,
+    reset_with_perturbation,
+    safe_env_reset,
     save_rollout_video,
 )
 from experiments.robot.openvla_utils import get_processor
+from prismatic.util.cot_utils import CotTag
+from prismatic.util.reasoning_metrics import (
+    RunningStats,
+    compute_bbox_iou_stats,
+    compute_gripper_distance,
+    parse_bboxes_from_reasoning,
+    parse_gripper_from_reasoning,
+    parse_text_field_from_reasoning,
+    token_jaccard_similarity,
+)
 from experiments.robot.robot_utils import (
     DATE_TIME,
     get_action,
@@ -69,6 +85,7 @@ class GenerateConfig:
     hf_token: str = Path(".hf_token")                       # Model family
     pretrained_checkpoint: Union[str, Path] = "/home/hk-project-p0024638/uvrfq/hkfswork/minivla_reasoning_run_dir/prism-qwen25-dinosiglip-224px+0_5b+mx-libero-lm-90+n1+b16+x7/checkpoints/step-200000-epoch-45-loss=0.0165.pt"
     load_in_4bit: bool = False                       # (For OpenVLA only) Load with 4-bit quantization
+    load_in_8bit: bool = False
 
     center_crop: bool = False                         # Center crop? (if trained w/ random crop image aug)
     obs_history: int = 1                             # Number of images to pass in from history
@@ -79,7 +96,13 @@ class GenerateConfig:
     #################################################################################################################
     task_suite_name: str = "libero_90"          # Task suite.                                      Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     num_steps_wait: int = 10                         # Number of steps to wait for objects to stabilize in sim
-    num_trials_per_task: int = 20                    # Number of rollouts per task
+    num_trials_per_task: int = 10                    # Number of rollouts per task
+
+    #################################################################################################################
+    # Generalization challenge parameters (perturbation & distractors)
+    #################################################################################################################
+    perturbation: bool = False                       # Expand initial object regions by 1.2× and require at least one task-relevant object in the expanded portion
+    distractors: bool = False                        # Add 1-2 random distractor objects from the LIBERO object suite into the scene
 
     #################################################################################################################
     # Utils
@@ -105,6 +128,15 @@ class GenerateConfig:
     
     rollout_dir_name: Optional[str] = None             # Optional name of the rollout directory
     reasoning_modifier_fn_str: str = "None"
+    experiment_type: str = "vanilla"                   # vanilla | ablation | noise_bbox | noise_text | custom
+    perturbation_type: str = "none"                    # Metadata for aggregation/filtering
+    perturbation_level: str = "none"                   # Metadata (e.g., sigma value bucket)
+    noise_sigma: float = 0.0                           # Used by parameterized noise modifiers
+    ablation_components: str = ""                      # Comma-separated reasoning parts removed
+    enable_reasoning_metrics: bool = True              # Compute IoU/gripper/text metrics online
+    reasoning_gt_source: str = "runtime_seg"           # runtime_seg (primary implemented source)
+    metrics_camera_name: str = "agentview"             # Camera used for segmentation/projection metrics
+    text_metric_pred_tag: str = CotTag.SUBTASK.value   # Reasoning text section used for text Jaccard
     # fmt: on
 
 
@@ -154,6 +186,13 @@ def _resolve_eval_task_ids(cfg: GenerateConfig, num_tasks_in_suite: int) -> list
             f"but got shard_rank={cfg.shard_rank}, num_shards={cfg.num_shards}."
         )
     return [task_id for task_id in range(num_tasks_in_suite) if task_id % cfg.num_shards == cfg.shard_rank]
+
+
+def _stats_payload(stats: RunningStats) -> dict:
+    payload = stats.to_dict()
+    payload["sum"] = float(stats.total)
+    payload["sum_sq"] = float(stats.total_sq)
+    return payload
 
 
 @draccus.wrap()
@@ -228,6 +267,10 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
     # Start evaluation
     total_episodes, total_successes = 0, 0
+    global_bbox_iou_stats = RunningStats()
+    global_gripper_dist_stats = RunningStats()
+    global_text_jaccard_stats = RunningStats()
+    per_episode_metrics = []
     per_task_metrics = {}
     for task_id in tqdm.tqdm(eval_task_ids):
         # Get task
@@ -236,24 +279,63 @@ def eval_libero(cfg: GenerateConfig) -> None:
         # Get default LIBERO initial states
         initial_states = task_suite.get_task_init_states(task_id)
 
+        # Optionally create a modified BDDL file with distractor objects
+        bddl_file_override = None
+        if cfg.distractors:
+            original_bddl = os.path.join(
+                get_libero_path("bddl_files"), task.problem_folder, task.bddl_file
+            )
+            distractor_rng = np.random.RandomState(cfg.seed + task_id * 1000)
+            bddl_file_override = create_bddl_with_distractors(original_bddl, rng=distractor_rng)
+
         # Initialize LIBERO environment and task description
-        env, task_description = get_libero_env(task, cfg.model_family, resolution=resize_size)
+        # Placement RNG: avoid env.seed(0) on every task (identical first reset across tasks).
+        _placement_seed = (
+            int(cfg.seed) + int(task_id) * 1000
+            if (cfg.perturbation or cfg.distractors)
+            else 0
+        )
+        env, task_description = get_libero_env(
+            task,
+            cfg.model_family,
+            resolution=resize_size,
+            enable_segmentation_metrics=cfg.enable_reasoning_metrics and cfg.reasoning_gt_source == "runtime_seg",
+            bddl_file_override=bddl_file_override,
+            # Perturbation mutates sampler ranges in memory; hard_reset reloads MJCF and
+            # rebuilds samplers from BDDL, wiping those edits.
+            hard_reset=not cfg.perturbation,
+            placement_seed=_placement_seed,
+        )
+
+        # Optionally apply perturbation (expand placement regions by 1.2×)
+        perturbation_info = None
+        if cfg.perturbation:
+            perturbation_info = apply_perturbation_to_env(env, factor=1.2)
 
         # Start episodes
         task_episodes, task_successes = 0, 0
+        task_bbox_iou_stats = RunningStats()
+        task_gripper_dist_stats = RunningStats()
+        task_text_jaccard_stats = RunningStats()
         for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
             done = False
             print(f"\nTask: {task_description}")
             log_file.write(f"\nTask: {task_description}\n")
 
-            # Reset environment
-            env.reset()
-
-            # Set initial states
-            obs = env.set_init_state(initial_states[episode_idx])
+            # Reset environment and set initial state
+            if cfg.perturbation:
+                obs = reset_with_perturbation(env, perturbation_info)
+            elif cfg.distractors:
+                obs = safe_env_reset(env)
+            else:
+                env.reset()
+                obs = env.set_init_state(initial_states[episode_idx])
 
             # Setup
             t = 0
+            episode_bbox_iou_stats = RunningStats()
+            episode_gripper_dist_stats = RunningStats()
+            episode_text_jaccard_stats = RunningStats()
             replay_images = []
             replay_images_annotated = []
             replay_wrist_images = []
@@ -323,11 +405,37 @@ def eval_libero(cfg: GenerateConfig) -> None:
                         reasoning_modifier_fn=reasoning_modifier_fn,
                         processor=processor,
                     )
+
                     if action.shape == (1, 7):
                         action = [action]
                     for predicted_action in action:
                         #print(f"{reasoning} ACTION: {predicted_action}")
                         #TODO - for loop für mehrere actions
+                        if cfg.enable_reasoning_metrics and isinstance(reasoning, str):
+                            # Collect one metric sample per executed action (important for chunked action outputs).
+                            gt_bboxes = extract_gt_bboxes_from_obs(env, obs, camera_name=cfg.metrics_camera_name)
+                            if gt_bboxes:
+                                pred_bboxes = parse_bboxes_from_reasoning(reasoning)
+                                iou_stats = compute_bbox_iou_stats(pred_bboxes, gt_bboxes)
+                                if iou_stats["count"] > 0:
+                                    iou_values = list(iou_stats["per_object_iou"].values())
+                                    episode_bbox_iou_stats.add_many(iou_values)
+                                    task_bbox_iou_stats.add_many(iou_values)
+                                    global_bbox_iou_stats.add_many(iou_values)
+
+                            pred_gripper = parse_gripper_from_reasoning(reasoning)
+                            gt_gripper = extract_gt_gripper_pixel_from_obs(env, obs, camera_name=cfg.metrics_camera_name)
+                            gripper_dist = compute_gripper_distance(pred_gripper, gt_gripper)
+                            episode_gripper_dist_stats.add(gripper_dist)
+                            task_gripper_dist_stats.add(gripper_dist)
+                            global_gripper_dist_stats.add(gripper_dist)
+
+                            pred_text = parse_text_field_from_reasoning(reasoning, cfg.text_metric_pred_tag)
+                            text_jaccard = token_jaccard_similarity(pred_text, task_description)
+                            episode_text_jaccard_stats.add(text_jaccard)
+                            task_text_jaccard_stats.add(text_jaccard)
+                            global_text_jaccard_stats.add(text_jaccard)
+
                         # Normalize gripper action [0,1] -> [-1,+1] because the environment expects the latter
                         predicted_action = normalize_gripper_action(predicted_action, binarize=True)
                         # [OpenVLA] The dataloader flips the sign of the gripper action to align with other datasets
@@ -354,6 +462,18 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
             task_episodes += 1
             total_episodes += 1
+            per_episode_metrics.append(
+                {
+                    "task_id": int(task_id),
+                    "task_description": task_description,
+                    "episode_idx": int(episode_idx),
+                    "success": bool(done),
+                    "steps_executed": int(t),
+                    "bbox_iou": _stats_payload(episode_bbox_iou_stats),
+                    "gripper_distance": _stats_payload(episode_gripper_dist_stats),
+                    "text_jaccard": _stats_payload(episode_text_jaccard_stats),
+                }
+            )
 
             # Save a replay video of the episode
             rollout_idx = task_id * cfg.num_trials_per_task + episode_idx + 1
@@ -391,12 +511,31 @@ def eval_libero(cfg: GenerateConfig) -> None:
                     f"num_episodes/{task_description}": task_episodes,
                 }
             )
-        per_task_metrics[task_description] = {
+        metrics_key = task_description
+        if metrics_key in per_task_metrics:
+            metrics_key = f"{task_description} [task_id={int(task_id)}]"
+            while metrics_key in per_task_metrics:
+                metrics_key = f"{task_description} [task_id={int(task_id)}-dup]"
+
+        per_task_metrics[metrics_key] = {
             "task_id": int(task_id),
+            "task_description": task_description,
             "task_successes": int(task_successes),
             "task_episodes": int(task_episodes),
             "task_success_rate": float(task_successes) / float(task_episodes),
+            "bbox_iou": _stats_payload(task_bbox_iou_stats),
+            "gripper_distance": _stats_payload(task_gripper_dist_stats),
+            "text_jaccard": _stats_payload(task_text_jaccard_stats),
         }
+
+        # Clean up temporary distractor BDDL file
+        if bddl_file_override is not None and bddl_file_override != os.path.join(
+            get_libero_path("bddl_files"), task.problem_folder, task.bddl_file
+        ):
+            try:
+                os.unlink(bddl_file_override)
+            except OSError:
+                pass
 
     # Save local log file
     log_file.close()
@@ -413,6 +552,17 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
     if cfg.save_metrics_json:
         metrics_payload = {
+            "experiment_type": cfg.experiment_type,
+            "perturbation_type": cfg.perturbation_type,
+            "perturbation_level": cfg.perturbation_level,
+            "perturbation": cfg.perturbation,
+            "distractors": cfg.distractors,
+            "noise_sigma": float(cfg.noise_sigma),
+            "ablation_components": cfg.ablation_components,
+            "reasoning_modifier_fn_str": cfg.reasoning_modifier_fn_str,
+            "reasoning_gt_source": cfg.reasoning_gt_source,
+            "metrics_camera_name": cfg.metrics_camera_name,
+            "text_metric_pred_tag": cfg.text_metric_pred_tag,
             "task_suite_name": cfg.task_suite_name,
             "model_family": cfg.model_family,
             "pretrained_checkpoint": str(cfg.pretrained_checkpoint),
@@ -425,7 +575,13 @@ def eval_libero(cfg: GenerateConfig) -> None:
             "total_episodes": int(total_episodes),
             "total_successes": int(total_successes),
             "total_success_rate": float(total_successes) / float(total_episodes),
+            "reasoning_metrics": {
+                "bbox_iou": _stats_payload(global_bbox_iou_stats),
+                "gripper_distance": _stats_payload(global_gripper_dist_stats),
+                "text_jaccard": _stats_payload(global_text_jaccard_stats),
+            },
             "per_task_metrics": per_task_metrics,
+            "per_episode_metrics": per_episode_metrics,
             "log_path": local_log_filepath,
         }
         metrics_json_filepath = os.path.join(cfg.local_log_dir, run_id + ".json")

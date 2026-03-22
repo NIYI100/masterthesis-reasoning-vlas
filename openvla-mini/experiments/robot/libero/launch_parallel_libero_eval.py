@@ -72,6 +72,33 @@ def _aggregate_worker_metrics(metric_paths: List[str]) -> dict:
     combined_total_successes = 0
     combined_task_ids = set()
     combined_per_task = {}
+    worker_registry = []
+    metric_accumulators = {
+        "bbox_iou": {"count": 0, "sum": 0.0, "sum_sq": 0.0},
+        "gripper_distance": {"count": 0, "sum": 0.0, "sum_sq": 0.0},
+        "text_jaccard": {"count": 0, "sum": 0.0, "sum_sq": 0.0},
+    }
+
+    def _merge_metric_stats(metric_name: str, worker_metric: dict) -> None:
+        if not isinstance(worker_metric, dict):
+            return
+        count = int(worker_metric.get("count", 0))
+        if count <= 0:
+            return
+
+        # Prefer exact running totals if provided by worker JSON.
+        if "sum" in worker_metric and "sum_sq" in worker_metric:
+            total = float(worker_metric.get("sum", 0.0))
+            total_sq = float(worker_metric.get("sum_sq", 0.0))
+        else:
+            mean = float(worker_metric.get("mean", 0.0))
+            std = float(worker_metric.get("std", 0.0))
+            total = mean * count
+            total_sq = ((std**2) * (count - 1)) + (count * (mean**2)) if count > 1 else total * mean
+
+        metric_accumulators[metric_name]["count"] += count
+        metric_accumulators[metric_name]["sum"] += total
+        metric_accumulators[metric_name]["sum_sq"] += total_sq
 
     for payload in payloads:
         combined_total_episodes += int(payload["total_episodes"])
@@ -86,8 +113,48 @@ def _aggregate_worker_metrics(metric_paths: List[str]) -> dict:
             combined_task_ids.add(task_id)
             combined_per_task[task_desc] = task_data
 
+        worker_registry.append(
+            {
+                "worker_shard_rank": int(payload.get("shard_rank", -1)),
+                "worker_num_shards": int(payload.get("num_shards", -1)),
+                "total_episodes": int(payload.get("total_episodes", 0)),
+                "total_successes": int(payload.get("total_successes", 0)),
+                "total_success_rate": float(payload.get("total_success_rate", 0.0)),
+                "source_path": payload["_source_path"],
+            }
+        )
+
+        worker_reasoning_metrics = payload.get("reasoning_metrics", {})
+        for metric_name in metric_accumulators.keys():
+            _merge_metric_stats(metric_name, worker_reasoning_metrics.get(metric_name, {}))
+
+    aggregated_reasoning_metrics = {}
+    for metric_name, acc in metric_accumulators.items():
+        count = int(acc["count"])
+        if count <= 0:
+            aggregated_reasoning_metrics[metric_name] = {"count": 0, "mean": None, "std": None, "sum": 0.0, "sum_sq": 0.0}
+            continue
+        mean = float(acc["sum"]) / float(count)
+        if count > 1:
+            variance = (float(acc["sum_sq"]) - count * (mean**2)) / float(count - 1)
+            std = float(max(0.0, variance) ** 0.5)
+        else:
+            std = 0.0
+        aggregated_reasoning_metrics[metric_name] = {
+            "count": count,
+            "mean": float(mean),
+            "std": float(std),
+            "sum": float(acc["sum"]),
+            "sum_sq": float(acc["sum_sq"]),
+        }
+
     return {
         "task_suite_name": task_suite_name,
+        "experiment_type": payloads[0].get("experiment_type", "unknown"),
+        "perturbation_type": payloads[0].get("perturbation_type", "unknown"),
+        "perturbation_level": payloads[0].get("perturbation_level", "unknown"),
+        "noise_sigma": float(payloads[0].get("noise_sigma", 0.0)),
+        "reasoning_modifier_fn_str": payloads[0].get("reasoning_modifier_fn_str", "None"),
         "num_trials_per_task": int(num_trials_per_task),
         "num_shards_found": len(payloads),
         "input_metric_paths": sorted(metric_paths),
@@ -96,12 +163,20 @@ def _aggregate_worker_metrics(metric_paths: List[str]) -> dict:
         "total_episodes": int(combined_total_episodes),
         "total_successes": int(combined_total_successes),
         "total_success_rate": float(combined_total_successes) / float(combined_total_episodes),
+        "reasoning_metrics": aggregated_reasoning_metrics,
+        "worker_registry": worker_registry,
         "per_task_metrics": combined_per_task,
     }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Launch parallel LIBERO eval workers.")
+    parser.add_argument(
+        "--rollout_dir_name",
+        type=str,
+        default="",
+        help="Optional rollout folder name; also used as parallel launch log/result label.",
+    )
     parser.add_argument("--gpus", type=str, required=False, help="Comma-separated GPU IDs (e.g. '0,1').")
     parser.add_argument("--workers_per_gpu", type=int, default=1, help="How many eval workers per GPU.")
     parser.add_argument(
@@ -141,8 +216,26 @@ def main() -> None:
     if len(eval_args) > 0 and eval_args[0] == "--":
         eval_args = eval_args[1:]
 
+    effective_rollout_dir_name = args.rollout_dir_name.strip()
+    if effective_rollout_dir_name == "":
+        effective_rollout_dir_name = _get_arg_value(eval_args, "--rollout_dir_name", "").strip()
+    if effective_rollout_dir_name != "":
+        # Ensure run_libero_eval workers all receive the same rollout folder name.
+        eval_args = _upsert_arg(eval_args, "--rollout_dir_name", effective_rollout_dir_name)
+    local_log_dir = _get_arg_value(eval_args, "--local_log_dir", "./experiments/logs").strip()
+    if effective_rollout_dir_name != "":
+        # Keep worker logs grouped per experiment by default, matching rollout_dir_name.
+        normalized_log_dir = os.path.normpath(local_log_dir)
+        if os.path.basename(normalized_log_dir) != effective_rollout_dir_name:
+            local_log_dir = os.path.join(local_log_dir, effective_rollout_dir_name)
+    # Ensure workers and aggregate logic use the same resolved log directory.
+    eval_args = _upsert_arg(eval_args, "--local_log_dir", local_log_dir)
+
     launch_id = time.strftime("%Y_%m_%d-%H_%M_%S")
+    launch_name = effective_rollout_dir_name.replace(" ", "_").replace("/", "-")
     launch_prefix = f"PARALLEL-{launch_id}-"
+    if launch_name != "":
+        launch_prefix = f"PARALLEL-{launch_id}-{launch_name}-"
     eval_args = _upsert_arg(eval_args, "--prefix", f"{launch_prefix}{_get_arg_value(eval_args, '--prefix', '')}")
 
     local_num_workers = len(gpus) * args.workers_per_gpu

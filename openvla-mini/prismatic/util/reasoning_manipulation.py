@@ -3,6 +3,7 @@ import re
 import ast
 import numpy as np
 import os
+import random
 
 """
 Reasoning looks like this:
@@ -23,7 +24,18 @@ def get_reasoning_fn(fn_name: str):
     """
     if not fn_name or fn_name.lower() in ["none", "null", ""]:
         return None
-        
+
+    if fn_name.startswith("ablate:"):
+        component_list = [c.strip() for c in fn_name.split(":", maxsplit=1)[1].split(",") if c.strip()]
+        return build_ablation_fn(component_list)
+
+    if fn_name.startswith("gaussian_bbox_sigma:"):
+        sigma = float(fn_name.split(":", maxsplit=1)[1])
+        return make_gaussian_bbox_noise(sigma)
+
+    if fn_name in {"shuffle_subtask", "shuffle_subtask_words"}:
+        return shuffle_subtask_words
+
     # Get the dictionary of everything defined in THIS file
     current_file_namespace = globals()
     
@@ -43,7 +55,6 @@ def reasoning_dropout_50(reasoning):
     At inference, use reasoning_modifier_fn_str="None" so no reasoning is generated.
     This matches the paper's best LIBERO-90 results (~89%).
     """
-    import random
     return "" if random.random() < 0.5 else reasoning
 
 def swap_x_y(reasoning):
@@ -144,7 +155,16 @@ def cut_out_plan(reasoning):
 def gauß_50(reasoning):
     return _gauß_on_bboxes(reasoning, 50, "/home/hk-project-p0024638/uvrfq/shifts_sigma50.jsonl")
 
-def _gauß_on_bboxes(reasoning, sigma, folder_path, max_val=224):
+def make_gaussian_bbox_noise(sigma, folder_path=None, max_val=224):
+    sigma = float(sigma)
+
+    def _apply(reasoning):
+        return _gauß_on_bboxes(reasoning, sigma=sigma, folder_path=folder_path, max_val=max_val)
+
+    return _apply
+
+
+def _gauß_on_bboxes(reasoning, sigma, folder_path=None, max_val=224):
     actual_dx = []
     actual_dy = []
     # Helper function to apply Gaussian shift and track it
@@ -189,10 +209,53 @@ def _gauß_on_bboxes(reasoning, sigma, folder_path, max_val=224):
     updated_string = re.sub(r'VISIBLE OBJECTS:@(\{.*?\})@', shift_objects, reasoning)
     updated_string = re.sub(r'GRIPPER POSITION:@(\[.*?\])', shift_gripper, updated_string)
 
-    if actual_dx and actual_dy:
+    if folder_path and actual_dx and actual_dy:
         update_running_sigma(folder_path, sigma, actual_dx, actual_dy)
 
     return updated_string
+
+
+def _shuffle_words(text: str) -> str:
+    words = text.split()
+    if len(words) <= 1:
+        return text
+    random.shuffle(words)
+    return " ".join(words)
+
+
+def shuffle_subtask_words(reasoning):
+    def _replace(match):
+        prefix = match.group(1)
+        subtask_text = match.group(2).strip()
+        return f"{prefix}{_shuffle_words(subtask_text)}"
+
+    return re.sub(r"(SUBTASK:@)(.*?)(?=@[A-Z ]+?:@?|$)", _replace, reasoning)
+
+
+def build_ablation_fn(components):
+    component_to_fn = {
+        "plan": cut_out_plan,
+        "visible_objects": cut_out_visible_objects,
+        "subtask_reasoning": cut_out_subtask_reasoning,
+        "subtask": cut_out_subtask,
+        "move_reasoning": cut_out_move_reasoning,
+        "move": cut_out_move,
+        "gripper": cut_out_gripper,
+    }
+
+    selected_fns = []
+    for component in components:
+        key = component.strip().lower()
+        if key in component_to_fn:
+            selected_fns.append(component_to_fn[key])
+
+    def _ablate(reasoning):
+        updated = reasoning
+        for fn in selected_fns:
+            updated = fn(updated)
+        return updated
+
+    return _ablate
 
 def initialize_shift_log(filepath, target_sigma):
     """
