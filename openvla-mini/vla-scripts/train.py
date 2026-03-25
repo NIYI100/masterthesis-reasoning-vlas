@@ -51,6 +51,15 @@ from prismatic.util.reasoning_manipulation import *
 overwatch = initialize_overwatch(__name__)
 
 
+def _modifier_run_slug(reasoning_modifier_fn_str: Optional[str]) -> str:
+    """Filesystem-safe token so each `reasoning_modifier_fn_str` maps to a distinct run directory."""
+    s = (reasoning_modifier_fn_str or "").strip()
+    if s.lower() in ("none", "null", ""):
+        return "vanilla"
+    slug = re.sub(r"[^a-zA-Z0-9_.-]+", "_", s)
+    return slug or "vanilla"
+
+
 @dataclass
 class TrainConfig:
     # fmt: off
@@ -133,11 +142,14 @@ def train(cfg: TrainConfig) -> None:
 
     # Configure Unique Run Name & Save Directory
     vla_id = cfg.vla.vla_id
+    auto_run_id = cfg.run_id is None
     cfg.run_id = (
         f"{vla_id}+n{cfg.vla.expected_world_size // 8}+b{cfg.per_device_batch_size}+x{cfg.seed}"
         if cfg.run_id is None
         else cfg.run_id
     )
+    if auto_run_id:
+        cfg.run_id += f"+mod-{_modifier_run_slug(cfg.reasoning_modifier_fn_str)}"
     if cfg.run_id_note is not None:
         cfg.run_id += f"--{cfg.run_id_note}"
     if cfg.image_aug:
