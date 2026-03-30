@@ -15,6 +15,13 @@ from typing import List
 
 import torch
 
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_OPENVLA_MINI_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", "..", ".."))
+if _OPENVLA_MINI_ROOT not in sys.path:
+    sys.path.insert(0, _OPENVLA_MINI_ROOT)
+
+from prismatic.util.reasoning_metrics import merge_reasoning_metrics_payloads
+
 
 def _parse_gpus(gpu_str: str) -> List[str]:
     gpus = [token.strip() for token in gpu_str.split(",") if token.strip() != ""]
@@ -73,32 +80,7 @@ def _aggregate_worker_metrics(metric_paths: List[str]) -> dict:
     combined_task_ids = set()
     combined_per_task = {}
     worker_registry = []
-    metric_accumulators = {
-        "bbox_iou": {"count": 0, "sum": 0.0, "sum_sq": 0.0},
-        "gripper_distance": {"count": 0, "sum": 0.0, "sum_sq": 0.0},
-        "text_jaccard": {"count": 0, "sum": 0.0, "sum_sq": 0.0},
-    }
-
-    def _merge_metric_stats(metric_name: str, worker_metric: dict) -> None:
-        if not isinstance(worker_metric, dict):
-            return
-        count = int(worker_metric.get("count", 0))
-        if count <= 0:
-            return
-
-        # Prefer exact running totals if provided by worker JSON.
-        if "sum" in worker_metric and "sum_sq" in worker_metric:
-            total = float(worker_metric.get("sum", 0.0))
-            total_sq = float(worker_metric.get("sum_sq", 0.0))
-        else:
-            mean = float(worker_metric.get("mean", 0.0))
-            std = float(worker_metric.get("std", 0.0))
-            total = mean * count
-            total_sq = ((std**2) * (count - 1)) + (count * (mean**2)) if count > 1 else total * mean
-
-        metric_accumulators[metric_name]["count"] += count
-        metric_accumulators[metric_name]["sum"] += total
-        metric_accumulators[metric_name]["sum_sq"] += total_sq
+    aggregated_reasoning_metrics: dict = {}
 
     for payload in payloads:
         combined_total_episodes += int(payload["total_episodes"])
@@ -125,28 +107,9 @@ def _aggregate_worker_metrics(metric_paths: List[str]) -> dict:
         )
 
         worker_reasoning_metrics = payload.get("reasoning_metrics", {})
-        for metric_name in metric_accumulators.keys():
-            _merge_metric_stats(metric_name, worker_reasoning_metrics.get(metric_name, {}))
-
-    aggregated_reasoning_metrics = {}
-    for metric_name, acc in metric_accumulators.items():
-        count = int(acc["count"])
-        if count <= 0:
-            aggregated_reasoning_metrics[metric_name] = {"count": 0, "mean": None, "std": None, "sum": 0.0, "sum_sq": 0.0}
-            continue
-        mean = float(acc["sum"]) / float(count)
-        if count > 1:
-            variance = (float(acc["sum_sq"]) - count * (mean**2)) / float(count - 1)
-            std = float(max(0.0, variance) ** 0.5)
-        else:
-            std = 0.0
-        aggregated_reasoning_metrics[metric_name] = {
-            "count": count,
-            "mean": float(mean),
-            "std": float(std),
-            "sum": float(acc["sum"]),
-            "sum_sq": float(acc["sum_sq"]),
-        }
+        aggregated_reasoning_metrics = merge_reasoning_metrics_payloads(
+            aggregated_reasoning_metrics, worker_reasoning_metrics
+        )
 
     return {
         "task_suite_name": task_suite_name,

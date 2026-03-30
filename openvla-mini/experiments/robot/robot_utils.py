@@ -6,7 +6,6 @@ import random
 import time
 
 from typing import Optional
-from PIL import Image
 
 import numpy as np
 import torch
@@ -85,8 +84,9 @@ def get_image_resize_size(cfg):
 
 
 def get_action(cfg, model, obs, task_label, reasoning_modifier_fn: Optional[callable] = None, processor=None):
-    """Queries the model to get an action."""
+    """Queries the model to get an action. Returns (action, reasoning, clean_reasoning_or_none)."""
     reasoning = ""
+    clean_reasoning = None
     if cfg.model_family == "prismatic":
         action = get_prismatic_vla_action(
             model, processor, cfg.pretrained_checkpoint, obs, task_label, cfg.unnorm_key, center_crop=cfg.center_crop
@@ -98,29 +98,14 @@ def get_action(cfg, model, obs, task_label, reasoning_modifier_fn: Optional[call
         )
         assert action.shape == (ACTION_DIM,)
     elif cfg.model_family == "minivla":
-        action, reasoning = get_minivla_action(
+        action, reasoning, clean_reasoning = get_minivla_action(
             model, obs, task_label, reasoning_modifier_fn, center_crop=cfg.center_crop, unnorm_key=cfg.unnorm_key
         )
 
         assert action.shape == (ACTION_DIM,) or action.shape == (10, ACTION_DIM)
-        if not isinstance(obs["full_image"], list):
-        
-            print("Warning: `obs['full_image']` is not a list. Wrapping in list to ensure compatibility with code expecting a list of images.")
-            obs["full_image"] = [obs["full_image"]]
-
-        processed_images = []
-
-        for img in obs["full_image"]:
-            image = Image.fromarray(img)
-            image = image.convert("RGB")
-        processed_images.append(image)
-
-        # extract for single image
-        if len(processed_images) == 1:
-            processed_images = processed_images[0]
     else:
         raise ValueError("Unexpected `model_family` found in config.")
-    return action, reasoning
+    return action, reasoning, clean_reasoning
 
 
 def normalize_gripper_action(action, binarize=True):

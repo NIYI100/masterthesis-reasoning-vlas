@@ -1,0 +1,59 @@
+# Base specs (bbox + gripper). Text word-dropout plots are added in code per CoT field
+# (see TEXT_WORD_DROPOUT_FIELDS in plot_experiment_metrics.py).
+# Use --noise-bbox / --noise-gripper / --noise-text to restrict; omit all three for everything.
+plots:
+  - id: bbox_noise_sigma_vs_sr
+    category: bbox
+    title: "BBox noise: success rate vs σ"
+    chart_type: line
+    x: noise_sigma
+    y: total_success_rate
+    x_label: "Noise σ"
+    y_label: "Success rate"
+    color: line_series
+    color_legend_title: "Task suite"
+    sort_by_x: true
+    filters:
+      experiment_type: noise_bbox
+
+  - id: bbox_noise_iou_vs_sr
+    category: bbox
+    title: "BBox noise: success rate vs mean bbox IoU"
+    chart_type: line
+    x: reasoning_metrics.bbox_iou.mean
+    y: total_success_rate
+    x_label: "Mean bbox IoU"
+    y_label: "Success rate"
+    color: line_series
+    color_legend_title: "Task suite"
+    sort_by_x: true
+    filters:
+      experiment_type: noise_bbox
+
+  - id: gripper_noise_sigma_vs_sr
+    category: gripper
+    title: "Gripper noise: success rate vs σ"
+    chart_type: line
+    x: noise_sigma
+    y: total_success_rate
+    x_label: "Noise σ"
+    y_label: "Success rate"
+    color: line_series
+    color_legend_title: "Task suite"
+    sort_by_x: true
+    filters:
+      experiment_type: noise_gripper
+
+  - id: gripper_noise_gripper_px_vs_sr
+    category: gripper
+    title: "Gripper noise: success rate vs mean gripper distance (px)"
+    chart_type: line
+    x: reasoning_metrics.gripper_distance.mean
+    y: total_success_rate
+    x_label: "Mean gripper distance (px)"
+    y_label: "Success rate"
+    color: line_series
+    color_legend_title: "Task suite"
+    sort_by_x: true
+    filters:
+      experiment_type: noise_gripper

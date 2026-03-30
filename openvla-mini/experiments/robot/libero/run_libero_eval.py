@@ -53,16 +53,17 @@ from experiments.robot.libero.libero_utils import (
     save_rollout_video,
 )
 from experiments.robot.openvla_utils import get_processor
-from prismatic.util.cot_utils import CotTag
 from prismatic.util.reasoning_metrics import (
     RunningStats,
+    add_text_rouge_l_samples,
     compute_bbox_iou_stats,
     compute_gripper_distance,
+    create_text_rouge_running_stats,
     parse_bboxes_from_reasoning,
     parse_gripper_from_reasoning,
-    parse_text_field_from_reasoning,
-    token_jaccard_similarity,
+    text_rouge_stats_to_payload,
 )
+from prismatic.util.reasoning_trace_log import append_reasoning_trace_line, resolve_reasoning_trace_path
 from experiments.robot.robot_utils import (
     DATE_TIME,
     get_action,
@@ -101,8 +102,8 @@ class GenerateConfig:
     #################################################################################################################
     # Generalization challenge parameters (perturbation & distractors)
     #################################################################################################################
-    perturbation: bool = False                       # Expand initial object regions by 1.2× and require at least one task-relevant object in the expanded portion
-    distractors: bool = False                        # Add 1-2 random distractor objects from the LIBERO object suite into the scene
+    perturbation: bool = True                       # Expand initial object regions by 1.2× and require at least one task-relevant object in the expanded portion
+    distractors: bool = True                        # Add 1-2 random distractor objects from the LIBERO object suite into the scene
 
     #################################################################################################################
     # Utils
@@ -136,7 +137,9 @@ class GenerateConfig:
     enable_reasoning_metrics: bool = True              # Compute IoU/gripper/text metrics online
     reasoning_gt_source: str = "runtime_seg"           # runtime_seg (primary implemented source)
     metrics_camera_name: str = "agentview"             # Camera used for segmentation/projection metrics
-    text_metric_pred_tag: str = CotTag.SUBTASK.value   # Reasoning text section used for text Jaccard
+    # NDJSON: one JSON object per line with task_id, episode_idx, env_step, reasoning, … (for offline GT ROUGE).
+    # With num_shards>1, path becomes base.shard{RANK}.jsonl automatically.
+    reasoning_trace_jsonl: Optional[str] = None
     # fmt: on
 
 
@@ -209,6 +212,11 @@ def eval_libero(cfg: GenerateConfig) -> None:
     cfg.unnorm_key = cfg.task_suite_name
     reasoning_modifier_fn = get_reasoning_fn(cfg.reasoning_modifier_fn_str)
 
+    reasoning_trace_resolved = resolve_reasoning_trace_path(
+        cfg.reasoning_trace_jsonl, cfg.num_shards, cfg.shard_rank
+    )
+    if reasoning_trace_resolved:
+        print(f"Reasoning trace log (NDJSON): {reasoning_trace_resolved}")
 
     # Load model
     model = get_model(cfg)
@@ -269,7 +277,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
     total_episodes, total_successes = 0, 0
     global_bbox_iou_stats = RunningStats()
     global_gripper_dist_stats = RunningStats()
-    global_text_jaccard_stats = RunningStats()
+    global_text_rouge_stats = create_text_rouge_running_stats()
     per_episode_metrics = []
     per_task_metrics = {}
     for task_id in tqdm.tqdm(eval_task_ids):
@@ -316,7 +324,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
         task_episodes, task_successes = 0, 0
         task_bbox_iou_stats = RunningStats()
         task_gripper_dist_stats = RunningStats()
-        task_text_jaccard_stats = RunningStats()
+        task_text_rouge_stats = create_text_rouge_running_stats()
         for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
             done = False
             print(f"\nTask: {task_description}")
@@ -335,7 +343,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
             t = 0
             episode_bbox_iou_stats = RunningStats()
             episode_gripper_dist_stats = RunningStats()
-            episode_text_jaccard_stats = RunningStats()
+            episode_text_rouge_stats = create_text_rouge_running_stats()
             replay_images = []
             replay_images_annotated = []
             replay_wrist_images = []
@@ -397,7 +405,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
                     }
 
                     # Query model to get action
-                    action, reasoning = get_action(
+                    action, reasoning, clean_reasoning = get_action(
                         cfg,
                         model,
                         observation,
@@ -405,6 +413,30 @@ def eval_libero(cfg: GenerateConfig) -> None:
                         reasoning_modifier_fn=reasoning_modifier_fn,
                         processor=processor,
                     )
+
+                    if reasoning_trace_resolved and isinstance(reasoning, str):
+                        ac = action
+                        n_ctrl = 1
+                        if isinstance(ac, np.ndarray) and ac.ndim == 2 and ac.shape[0] > 1:
+                            n_ctrl = int(ac.shape[0])
+                        append_reasoning_trace_line(
+                            reasoning_trace_resolved,
+                            {
+                                "task_suite_name": cfg.task_suite_name,
+                                "task_id": int(task_id),
+                                "task_description": task_description,
+                                "episode_idx": int(episode_idx),
+                                "env_step": int(t),
+                                "shard_rank": int(cfg.shard_rank),
+                                "num_shards": int(cfg.num_shards),
+                                "seed": int(cfg.seed),
+                                "reasoning": reasoning,
+                                "clean_reasoning": clean_reasoning,
+                                "reasoning_modifier_fn_str": cfg.reasoning_modifier_fn_str,
+                                "model_family": cfg.model_family,
+                                "control_actions_from_forward": n_ctrl,
+                            },
+                        )
 
                     if action.shape == (1, 7):
                         action = [action]
@@ -430,11 +462,26 @@ def eval_libero(cfg: GenerateConfig) -> None:
                             task_gripper_dist_stats.add(gripper_dist)
                             global_gripper_dist_stats.add(gripper_dist)
 
-                            pred_text = parse_text_field_from_reasoning(reasoning, cfg.text_metric_pred_tag)
-                            text_jaccard = token_jaccard_similarity(pred_text, task_description)
-                            episode_text_jaccard_stats.add(text_jaccard)
-                            task_text_jaccard_stats.add(text_jaccard)
-                            global_text_jaccard_stats.add(text_jaccard)
+                            use_task_ref = clean_reasoning is None
+                            ref_for_rouge = task_description if use_task_ref else clean_reasoning
+                            add_text_rouge_l_samples(
+                                episode_text_rouge_stats,
+                                reasoning,
+                                ref_for_rouge,
+                                use_task_ref,
+                            )
+                            add_text_rouge_l_samples(
+                                task_text_rouge_stats,
+                                reasoning,
+                                ref_for_rouge,
+                                use_task_ref,
+                            )
+                            add_text_rouge_l_samples(
+                                global_text_rouge_stats,
+                                reasoning,
+                                ref_for_rouge,
+                                use_task_ref,
+                            )
 
                         # Normalize gripper action [0,1] -> [-1,+1] because the environment expects the latter
                         predicted_action = normalize_gripper_action(predicted_action, binarize=True)
@@ -471,7 +518,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
                     "steps_executed": int(t),
                     "bbox_iou": _stats_payload(episode_bbox_iou_stats),
                     "gripper_distance": _stats_payload(episode_gripper_dist_stats),
-                    "text_jaccard": _stats_payload(episode_text_jaccard_stats),
+                    "text_rouge_l": text_rouge_stats_to_payload(episode_text_rouge_stats),
                 }
             )
 
@@ -525,7 +572,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
             "task_success_rate": float(task_successes) / float(task_episodes),
             "bbox_iou": _stats_payload(task_bbox_iou_stats),
             "gripper_distance": _stats_payload(task_gripper_dist_stats),
-            "text_jaccard": _stats_payload(task_text_jaccard_stats),
+            "text_rouge_l": text_rouge_stats_to_payload(task_text_rouge_stats),
         }
 
         # Clean up temporary distractor BDDL file
@@ -562,7 +609,8 @@ def eval_libero(cfg: GenerateConfig) -> None:
             "reasoning_modifier_fn_str": cfg.reasoning_modifier_fn_str,
             "reasoning_gt_source": cfg.reasoning_gt_source,
             "metrics_camera_name": cfg.metrics_camera_name,
-            "text_metric_pred_tag": cfg.text_metric_pred_tag,
+            "reasoning_trace_jsonl": cfg.reasoning_trace_jsonl,
+            "reasoning_trace_jsonl_resolved": reasoning_trace_resolved,
             "task_suite_name": cfg.task_suite_name,
             "model_family": cfg.model_family,
             "pretrained_checkpoint": str(cfg.pretrained_checkpoint),
@@ -578,7 +626,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
             "reasoning_metrics": {
                 "bbox_iou": _stats_payload(global_bbox_iou_stats),
                 "gripper_distance": _stats_payload(global_gripper_dist_stats),
-                "text_jaccard": _stats_payload(global_text_jaccard_stats),
+                "text_rouge_l": text_rouge_stats_to_payload(global_text_rouge_stats),
             },
             "per_task_metrics": per_task_metrics,
             "per_episode_metrics": per_episode_metrics,

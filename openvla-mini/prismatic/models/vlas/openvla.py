@@ -5,7 +5,7 @@ PyTorch Module defining OpenVLA as a lightweight wrapper around a PrismaticVLM; 
 discretizing actions with the ActionTokenizer.
 """
 
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -113,16 +113,10 @@ class OpenVLA(PrismaticVLM):
         instruction: str,
         reasoning_modifier_fn,
         unnorm_key: Optional[str] = None, **kwargs: str
-    ) -> np.ndarray:
+    ) -> Tuple[torch.Tensor, Optional[str]]:
         """
-        Core function for VLA inference; maps input image and task instruction to continuous action (de-tokenizes).
-
-        @param image: PIL Image as [height, width, 3]
-        @param instruction: Task instruction string
-        @param unnorm_key: Optional dataset name for retrieving un-normalizing statistics; if None, checks that model
-                           was trained only on a single dataset, and retrieves those statistics.
-
-        @return Unnormalized (continuous) action vector --> end-effector deltas.
+        MiniVLA two-stage generate: returns (suffix_token_ids, clean_reasoning_or_none).
+        If ``reasoning_modifier_fn`` is set, the second value is pre-modification reasoning from pass 1; else None.
         """
         image_transform, tokenizer = self.vision_backbone.get_image_transform(), self.llm_backbone.tokenizer
 
@@ -159,6 +153,7 @@ class OpenVLA(PrismaticVLM):
         
         autocast_dtype = self.llm_backbone.half_precision_dtype
         injected_reasoning = None
+        clean_reasoning_for_metrics: Optional[str] = None
 
         # Change the reasoning with some function
         if reasoning_modifier_fn:
@@ -168,6 +163,7 @@ class OpenVLA(PrismaticVLM):
                 )
             raw_text = tokenizer.decode(temp_generated_ids[0][input_ids.shape[1]:], skip_special_tokens=False)
             extracted_reasoning = raw_text.split("ACTION:")[0].strip()
+            clean_reasoning_for_metrics = extracted_reasoning
             modified_reasoning = reasoning_modifier_fn(extracted_reasoning)
             injected_reasoning = f"{modified_reasoning} ACTION:"
 
@@ -185,10 +181,8 @@ class OpenVLA(PrismaticVLM):
                 **kwargs
             )
             # fmt: on
-        full_text = tokenizer.decode(generated_ids[0], skip_special_tokens=False)
-
         new_generated_tokens = generated_ids[:, prompt_length:]
-        return new_generated_tokens
+        return new_generated_tokens, clean_reasoning_for_metrics
 
     @staticmethod
     def _check_unnorm_key(norm_stats: Dict, unnorm_key: str) -> str:

@@ -18,6 +18,101 @@ PLAN:@{'0': 'move to the black bowl', '1': 'grasp the black bowl', '2': 'move th
 ACTION: <|extra_178|><|extra_142|><|extra_106|><|extra_9|><|extra_134|><|extra_254|><|extra_25|><|im_end|><|endoftext|>
 """
 
+# Short registry keys -> CoT tag prefix (for word dropout / sentence shuffle / phrase swaps).
+NL_SHORT_TO_TAG = {
+    "plan": "PLAN:",
+    "subtask_reasoning": "SUBTASK REASONING:",
+    "subtask": "SUBTASK:",
+    "move_reasoning": "MOVE REASONING:",
+    "move": "MOVE:",
+}
+
+def _canonicalize_bidirectional_pairs(raw):
+    """Drop duplicate undirected edges; sort by longest phrase first (regex alternation order)."""
+    seen = set()
+    out = []
+    for a, b in raw:
+        a, b = a.strip(), b.strip()
+        if not a or not b:
+            continue
+        key = tuple(sorted((a.lower(), b.lower())))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((a, b))
+    out.sort(key=lambda ab: max(len(ab[0]), len(ab[1])), reverse=True)
+    return tuple(out)
+
+
+# Raw bidirectional (a<->b) opposites: multi-word LIBERO-style primitives + narrative synonyms.
+# `invert_motion_phrases` matches longest keys first (word-boundary safe).
+_MOTION_PHRASE_PAIR_RAW = (
+    # --- Frequent primitives (dataset-informed opposites) ---
+    ("stop", "start"),
+    ("close gripper", "open gripper"),
+    ("move down", "move up"),
+    ("move left", "move right"),
+    ("move forward", "move backward"),
+    ("rotate clockwise", "rotate counterclockwise"),
+    # --- Compound moves (comma-separated) ---
+    ("move up, open gripper", "move down, close gripper"),
+    ("move up, close gripper", "move down, open gripper"),
+    ("move down, close gripper", "move up, open gripper"),
+    ("move down, open gripper", "move up, close gripper"),
+    ("move backward, open gripper", "move forward, close gripper"),
+    ("move backward, close gripper", "move forward, open gripper"),
+    ("move forward, open gripper", "move backward, close gripper"),
+    ("move forward, close gripper", "move backward, open gripper"),
+    # --- Diagonal / diagonal + rotate ---
+    ("move forward right", "move backward left"),
+    ("move forward left", "move backward right"),
+    ("move backward left", "move forward right"),
+    ("move backward right", "move forward left"),
+    ("move left down", "move right up"),
+    ("move right down", "move left up"),
+    ("move left up", "move right down"),
+    ("move right up", "move left down"),
+    ("move forward down", "move backward up"),
+    ("move backward up", "move forward down"),
+    ("move forward up", "move backward down"),
+    ("move backward down", "move forward up"),
+    # --- Move + rotate (single comma) ---
+    ("move right, rotate clockwise", "move left, rotate counterclockwise"),
+    ("move left, rotate counterclockwise", "move right, rotate clockwise"),
+    ("move left, rotate clockwise", "move right, rotate counterclockwise"),
+    ("move right, rotate counterclockwise", "move left, rotate clockwise"),
+    ("move up, rotate clockwise", "move down, rotate counterclockwise"),
+    ("move up, rotate counterclockwise", "move down, rotate clockwise"),
+    ("move down, rotate clockwise", "move up, rotate counterclockwise"),
+    ("move down, rotate counterclockwise", "move up, rotate clockwise"),
+    ("move forward, rotate clockwise", "move backward, rotate counterclockwise"),
+    ("move forward, rotate counterclockwise", "move backward, rotate clockwise"),
+    ("move backward, rotate clockwise", "move forward, rotate counterclockwise"),
+    ("move backward, rotate counterclockwise", "move forward, rotate clockwise"),
+    # --- Move + gripper (single comma) ---
+    ("move right, open gripper", "move left, close gripper"),
+    ("move left, open gripper", "move right, close gripper"),
+    ("move right, close gripper", "move left, open gripper"),
+    ("move left, close gripper", "move right, open gripper"),
+    # --- Triple clauses ---
+    ("move backward right, rotate clockwise", "move forward left, rotate counterclockwise"),
+    ("move backward left, rotate counterclockwise", "move forward right, rotate clockwise"),
+    ("move right up, open gripper", "move left down, close gripper"),
+    ("move right up, close gripper", "move left down, open gripper"),
+    ("move left up, open gripper", "move right down, close gripper"),
+    ("move forward right, rotate clockwise", "move backward left, rotate counterclockwise"),
+    ("rotate clockwise, close gripper", "rotate counterclockwise, open gripper"),
+    ("rotate counterclockwise, close gripper", "rotate clockwise, open gripper"),
+    # --- Pick / place wording (CoT narrative) ---
+    ("pick up", "put down"),
+    ("grasp", "release"),
+    ("higher", "lower"),
+    ("upward", "downward"),
+)
+
+_MOTION_PHRASE_PAIRS: tuple[tuple[str, str], ...] = _canonicalize_bidirectional_pairs(_MOTION_PHRASE_PAIR_RAW)
+
+
 def get_reasoning_fn(fn_name: str):
     """
     Looks up a function defined in this file by its string name.
@@ -32,6 +127,40 @@ def get_reasoning_fn(fn_name: str):
     if fn_name.startswith("gaussian_bbox_sigma:"):
         sigma = float(fn_name.split(":", maxsplit=1)[1])
         return make_gaussian_bbox_noise(sigma)
+
+    if fn_name.startswith("gaussian_gripper_sigma:"):
+        sigma = float(fn_name.split(":", maxsplit=1)[1])
+        return make_gaussian_gripper_noise(sigma)
+
+    if fn_name.startswith("word_dropout:"):
+        rest = fn_name.split(":", maxsplit=1)[1]
+        if ":" in rest:
+            p_str, keys_str = rest.split(":", maxsplit=1)
+            p = float(p_str)
+            keys = [k.strip() for k in keys_str.split(",") if k.strip()]
+        else:
+            p = float(rest)
+            keys = None
+        return make_word_dropout(p, keys)
+
+    if fn_name == "sentence_shuffle" or fn_name == "sentence_shuffle_subtask_move_reasoning":
+        return make_sentence_shuffle(["subtask_reasoning", "move_reasoning"])
+
+    if fn_name.startswith("sentence_shuffle:"):
+        keys = [k.strip() for k in fn_name.split(":", maxsplit=1)[1].split(",") if k.strip()]
+        return make_sentence_shuffle(keys)
+
+    if fn_name == "invert_motion_phrases":
+        return make_invert_motion_phrases(list(NL_SHORT_TO_TAG.keys()))
+
+    if fn_name.startswith("invert_motion_phrases:"):
+        keys = [k.strip() for k in fn_name.split(":", maxsplit=1)[1].split(",") if k.strip()]
+        return make_invert_motion_phrases(keys)
+
+    # Metadata-only name: return None so OpenVLA stays single-pass (a no-op lambda would still trigger
+    # two-stage generate). Pair with --reasoning_trace_jsonl in run_libero_eval.py for NDJSON logging.
+    if fn_name == "knowledge_index_trace":
+        return None
 
     if fn_name in {"shuffle_subtask", "shuffle_subtask_words"}:
         return shuffle_subtask_words
@@ -213,6 +342,173 @@ def _gauß_on_bboxes(reasoning, sigma, folder_path=None, max_val=224):
         update_running_sigma(folder_path, sigma, actual_dx, actual_dy)
 
     return updated_string
+
+
+def make_gaussian_gripper_noise(sigma, folder_path=None, max_val=224):
+    sigma = float(sigma)
+
+    def _apply(reasoning):
+        return _gauß_on_gripper_only(reasoning, sigma=sigma, folder_path=folder_path, max_val=max_val)
+
+    return _apply
+
+
+def _gauß_on_gripper_only(reasoning, sigma, folder_path=None, max_val=224):
+    actual_dx = []
+    actual_dy = []
+
+    def apply_gauss_to_point(x, y):
+        intended_dx = int(np.round(np.random.normal(0, sigma)))
+        intended_dy = int(np.round(np.random.normal(0, sigma)))
+        new_x = max(0, min(x + intended_dx, max_val))
+        new_y = max(0, min(y + intended_dy, max_val))
+        actual_dx.append(new_x - x)
+        actual_dy.append(new_y - y)
+        return new_x, new_y
+
+    def shift_gripper(match):
+        list_str = match.group(1)
+        gripper_list = ast.literal_eval(list_str)
+        if len(gripper_list) == 2:
+            new_x, new_y = apply_gauss_to_point(gripper_list[0], gripper_list[1])
+            gripper_list = [new_x, new_y]
+        return f"GRIPPER POSITION:@{str(gripper_list)}"
+
+    updated_string = re.sub(r"GRIPPER POSITION:@(\[.*?\])", shift_gripper, reasoning)
+    if folder_path and actual_dx and actual_dy:
+        update_running_sigma(folder_path, sigma, actual_dx, actual_dy)
+    return updated_string
+
+
+def _map_tag_body(reasoning: str, tag_colon: str, fn):
+    esc = re.escape(tag_colon)
+    pattern = rf"({esc}@)(.*?)(?=@[A-Z ]+?:@?|$)"
+
+    def repl(m):
+        return m.group(1) + fn(m.group(2))
+
+    return re.sub(pattern, repl, reasoning, flags=re.DOTALL)
+
+
+def _word_dropout_words(text: str, p: float) -> str:
+    words = text.split()
+    if not words:
+        return text
+    kept = [w for w in words if random.random() >= p]
+    if not kept:
+        return random.choice(words)
+    return " ".join(kept)
+
+
+def _shuffle_sentences(text: str) -> str:
+    raw = text.strip()
+    if not raw:
+        return text
+    pieces = re.split(r"(?<=[.!?])\s+", raw)
+    pieces = [s for s in pieces if s.strip()]
+    if len(pieces) <= 1:
+        return text
+    random.shuffle(pieces)
+    return " ".join(pieces)
+
+
+def _invert_motion_phrases_in_text(text: str) -> str:
+    swap = {}
+    for a, b in _MOTION_PHRASE_PAIRS:
+        swap[a.lower()] = b
+        swap[b.lower()] = a
+    keys = sorted(swap.keys(), key=len, reverse=True)
+    pattern = re.compile("|".join(rf"\b{re.escape(k)}\b" for k in keys), flags=re.IGNORECASE)
+
+    def repl(m):
+        frag = m.group(0)
+        return swap.get(frag.lower(), frag)
+
+    return pattern.sub(repl, text)
+
+
+def _corrupt_plan_dict(reasoning: str, value_fn) -> str:
+    def repl(m):
+        dict_str = m.group(1)
+        d = ast.literal_eval(dict_str)
+        newd = {}
+        for k, v in d.items():
+            if isinstance(v, str):
+                newd[k] = value_fn(v)
+            else:
+                newd[k] = v
+        return f"PLAN:@{str(newd)}@"
+
+    return re.sub(r"PLAN:@(\{.*?\})@", repl, reasoning, flags=re.DOTALL)
+
+
+def make_word_dropout(p: float, tag_keys=None):
+    if tag_keys is None:
+        keys_set = set(NL_SHORT_TO_TAG.keys())
+    else:
+        keys_set = set(tag_keys)
+        unknown = keys_set - set(NL_SHORT_TO_TAG.keys())
+        if unknown:
+            print(f"Warning: word_dropout unknown tag keys (ignored): {unknown}")
+        keys_set &= set(NL_SHORT_TO_TAG.keys())
+
+    def apply(reasoning):
+        r = reasoning
+        if "plan" in keys_set:
+            r = _corrupt_plan_dict(r, lambda s: _word_dropout_words(s, p))
+        for short, tag in NL_SHORT_TO_TAG.items():
+            if short == "plan" or short not in keys_set:
+                continue
+            r = _map_tag_body(r, tag, lambda b, pp=p: _word_dropout_words(b, pp))
+        return r
+
+    return apply
+
+
+def make_sentence_shuffle(tag_keys: list):
+    keys_set = set(tag_keys)
+    unknown = keys_set - set(NL_SHORT_TO_TAG.keys())
+    if unknown:
+        print(f"Warning: sentence_shuffle unknown tag keys (ignored): {unknown}")
+    keys_set &= set(NL_SHORT_TO_TAG.keys())
+
+    def apply(reasoning):
+        r = reasoning
+        if "plan" in keys_set:
+            r = _corrupt_plan_dict(r, _shuffle_sentences)
+        for short, tag in NL_SHORT_TO_TAG.items():
+            if short == "plan" or short not in keys_set:
+                continue
+            r = _map_tag_body(r, tag, _shuffle_sentences)
+        return r
+
+    return apply
+
+
+def make_invert_motion_phrases(tag_keys: list):
+    """Apply phrase inversion only to listed short keys (see NL_SHORT_TO_TAG)."""
+    keys_set = set(tag_keys)
+    unknown = keys_set - set(NL_SHORT_TO_TAG.keys())
+    if unknown:
+        print(f"Warning: invert_motion_phrases unknown tag keys (ignored): {unknown}")
+    keys_set &= set(NL_SHORT_TO_TAG.keys())
+
+    def apply(reasoning):
+        r = reasoning
+        if "plan" in keys_set:
+            r = _corrupt_plan_dict(r, _invert_motion_phrases_in_text)
+        for short, tag in NL_SHORT_TO_TAG.items():
+            if short == "plan" or short not in keys_set:
+                continue
+            r = _map_tag_body(r, tag, _invert_motion_phrases_in_text)
+        return r
+
+    return apply
+
+
+def invert_motion_phrases(reasoning):
+    """Backward-compatible: invert on all NL_SHORT_TO_TAG fields."""
+    return make_invert_motion_phrases(list(NL_SHORT_TO_TAG.keys()))(reasoning)
 
 
 def _shuffle_words(text: str) -> str:

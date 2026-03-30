@@ -227,8 +227,8 @@ def get_minivla_action(vla, obs, task_label, reasoning_modifier_fn, center_crop=
     if len(processed_images) == 1:
         processed_images = processed_images[0]
 
-    generated_ids = vla.generate(
-        processed_images, 
+    generated_ids, clean_reasoning = vla.generate(
+        processed_images,
         task_label,
         reasoning_modifier_fn,
         **kwargs
@@ -266,7 +266,7 @@ def get_minivla_action(vla, obs, task_label, reasoning_modifier_fn, center_crop=
             continuous_action,
         )
 
-    return continuous_action, plan_text
+    return continuous_action, plan_text, clean_reasoning
 
 
 def get_prismatic_vla_action(vla, processor, base_vla_name, obs, task_label, unnorm_key, center_crop=False, **kwargs):
