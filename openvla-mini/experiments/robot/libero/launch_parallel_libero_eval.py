@@ -23,6 +23,17 @@ if _OPENVLA_MINI_ROOT not in sys.path:
 from prismatic.util.reasoning_metrics import merge_reasoning_metrics_payloads
 
 
+def _unique_task_metrics_key(base_name: str, existing_keys: set[str]) -> str:
+    if base_name not in existing_keys:
+        return base_name
+    suffix = 1
+    while True:
+        candidate = f"{base_name}_{suffix}"
+        if candidate not in existing_keys:
+            return candidate
+        suffix += 1
+
+
 def _parse_gpus(gpu_str: str) -> List[str]:
     gpus = [token.strip() for token in gpu_str.split(",") if token.strip() != ""]
     if len(gpus) == 0:
@@ -93,7 +104,8 @@ def _aggregate_worker_metrics(metric_paths: List[str]) -> dict:
                     "Each task should be evaluated by exactly one worker."
                 )
             combined_task_ids.add(task_id)
-            combined_per_task[task_desc] = task_data
+            unique_key = _unique_task_metrics_key(task_desc, set(combined_per_task.keys()))
+            combined_per_task[unique_key] = task_data
 
         worker_registry.append(
             {
@@ -186,6 +198,7 @@ def main() -> None:
         # Ensure run_libero_eval workers all receive the same rollout folder name.
         eval_args = _upsert_arg(eval_args, "--rollout_dir_name", effective_rollout_dir_name)
     local_log_dir = _get_arg_value(eval_args, "--local_log_dir", "./experiments/logs").strip()
+    pre_append_log_dir = local_log_dir
     if effective_rollout_dir_name != "":
         # Keep worker logs grouped per experiment by default, matching rollout_dir_name.
         normalized_log_dir = os.path.normpath(local_log_dir)
@@ -193,6 +206,21 @@ def main() -> None:
             local_log_dir = os.path.join(local_log_dir, effective_rollout_dir_name)
     # Ensure workers and aggregate logic use the same resolved log directory.
     eval_args = _upsert_arg(eval_args, "--local_log_dir", local_log_dir)
+
+    # If callers pass --reasoning_trace_jsonl next to the pre-append log dir (typical in sbatch:
+    # logs/DATE/<rollout>_trace.jsonl) but worker metrics live under logs/DATE/<suite>/<rollout>/,
+    # move the trace base path into the same folder as shard JSON so traces stay with the experiment.
+    trace_path = _get_arg_value(eval_args, "--reasoning_trace_jsonl", "").strip()
+    if trace_path and effective_rollout_dir_name != "":
+        trace_parent = os.path.dirname(trace_path)
+        if trace_parent == "":
+            trace_parent = "."
+        same_root = os.path.normpath(os.path.abspath(trace_parent)) == os.path.normpath(
+            os.path.abspath(pre_append_log_dir)
+        )
+        if same_root:
+            new_trace = os.path.join(local_log_dir, os.path.basename(trace_path))
+            eval_args = _upsert_arg(eval_args, "--reasoning_trace_jsonl", new_trace)
 
     launch_id = time.strftime("%Y_%m_%d-%H_%M_%S")
     launch_name = effective_rollout_dir_name.replace(" ", "_").replace("/", "-")
