@@ -54,13 +54,17 @@ from experiments.robot.libero.libero_utils import (
 )
 from experiments.robot.openvla_utils import get_processor
 from prismatic.util.reasoning_metrics import (
+    TEXT_ROUGE_FIELD_SPECS,
     RunningStats,
     add_text_rouge_l_samples,
+    concat_nl_reasoning_sections,
     compute_bbox_iou_stats,
     compute_gripper_distance,
     create_text_rouge_running_stats,
     parse_bboxes_from_reasoning,
     parse_gripper_from_reasoning,
+    parse_text_field_from_reasoning,
+    rouge_l_f1,
     text_rouge_stats_to_payload,
 )
 from prismatic.util.reasoning_trace_log import append_reasoning_trace_line, resolve_reasoning_trace_path
@@ -141,6 +145,10 @@ class GenerateConfig:
     # NDJSON: one JSON object per line with task_id, episode_idx, env_step, reasoning, … (for offline GT ROUGE).
     # With num_shards>1, path becomes base.shard{RANK}.jsonl automatically.
     reasoning_trace_jsonl: Optional[str] = None
+    # NDJSON: one JSON object per executed step with raw metric values (IoU per object, gripper distance,
+    # text ROUGE fields) and identifiers for later custom aggregation at step/episode/task/global levels.
+    # With num_shards>1, path becomes base.shard{RANK}.jsonl automatically.
+    reasoning_step_metrics_jsonl: Optional[str] = None
     # Counterfactual task/reasoning arm:
     # none | intact_task_swapped_reasoning | swapped_task_intact_reasoning
     counterfactual_arm: str = "none"
@@ -303,6 +311,11 @@ def eval_libero(cfg: GenerateConfig) -> None:
     )
     if reasoning_trace_resolved:
         print(f"Reasoning trace log (NDJSON): {reasoning_trace_resolved}")
+    reasoning_step_metrics_resolved = resolve_reasoning_trace_path(
+        cfg.reasoning_step_metrics_jsonl, cfg.num_shards, cfg.shard_rank
+    )
+    if reasoning_step_metrics_resolved:
+        print(f"Reasoning step-metrics log (NDJSON): {reasoning_step_metrics_resolved}")
     counterfactual_trace_resolved = resolve_reasoning_trace_path(
         cfg.counterfactual_trace_jsonl, cfg.num_shards, cfg.shard_rank
     )
@@ -673,14 +686,15 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
                     if action.shape == (1, 7):
                         action = [action]
-                    for predicted_action in action:
+                    for action_idx_in_forward, predicted_action in enumerate(action):
                         #print(f"{reasoning} ACTION: {predicted_action}")
                         #TODO - for loop für mehrere actions
                         if cfg.enable_reasoning_metrics and isinstance(reasoning, str):
                             # Collect one metric sample per executed action (important for chunked action outputs).
                             gt_bboxes = extract_gt_bboxes_from_obs(env, obs, camera_name=cfg.metrics_camera_name)
+                            pred_bboxes = parse_bboxes_from_reasoning(reasoning)
+                            iou_stats = {"count": 0, "mean": None, "std": None, "per_object_iou": {}}
                             if gt_bboxes:
-                                pred_bboxes = parse_bboxes_from_reasoning(reasoning)
                                 iou_stats = compute_bbox_iou_stats(pred_bboxes, gt_bboxes)
                                 if iou_stats["count"] > 0:
                                     iou_values = list(iou_stats["per_object_iou"].values())
@@ -715,6 +729,66 @@ def eval_libero(cfg: GenerateConfig) -> None:
                                 ref_for_rouge,
                                 use_task_ref,
                             )
+
+                            # Optional step-level raw metrics log for flexible offline aggregation.
+                            if reasoning_step_metrics_resolved:
+                                text_scores: dict[str, float] = {}
+                                for key, tag in TEXT_ROUGE_FIELD_SPECS:
+                                    pred_t = parse_text_field_from_reasoning(reasoning, tag)
+                                    if use_task_ref:
+                                        ref_t = ref_for_rouge
+                                    else:
+                                        ref_t = parse_text_field_from_reasoning(ref_for_rouge, tag) if ref_for_rouge else None
+                                    if pred_t is None:
+                                        continue
+                                    if ref_t is None or (isinstance(ref_t, str) and ref_t.strip() == ""):
+                                        continue
+                                    score = rouge_l_f1(pred_t, ref_t)
+                                    if score is not None:
+                                        text_scores[key] = float(score)
+
+                                pred_whole = concat_nl_reasoning_sections(reasoning)
+                                ref_whole = (
+                                    ref_for_rouge
+                                    if use_task_ref
+                                    else concat_nl_reasoning_sections(ref_for_rouge)
+                                )
+                                whole_score = None
+                                if pred_whole.strip() and ref_whole.strip():
+                                    ws = rouge_l_f1(pred_whole, ref_whole)
+                                    if ws is not None:
+                                        whole_score = float(ws)
+
+                                append_reasoning_trace_line(
+                                    reasoning_step_metrics_resolved,
+                                    {
+                                        "task_suite_name": cfg.task_suite_name,
+                                        "task_id": int(task_id),
+                                        "task_description": task_description,
+                                        "episode_idx": int(episode_idx),
+                                        "env_step": int(t),
+                                        "step_in_forward": int(action_idx_in_forward),
+                                        "control_actions_from_forward": int(n_ctrl),
+                                        "shard_rank": int(cfg.shard_rank),
+                                        "num_shards": int(cfg.num_shards),
+                                        "seed": int(cfg.seed),
+                                        "reasoning": reasoning,
+                                        "clean_reasoning": clean_reasoning,
+                                        "reasoning_modifier_fn_str": cfg.reasoning_modifier_fn_str,
+                                        "reasoning_source": reasoning_source,
+                                        "reasoning_gt_source": cfg.reasoning_gt_source,
+                                        "metrics_camera_name": cfg.metrics_camera_name,
+                                        "pred_bboxes": pred_bboxes,
+                                        "gt_bboxes": gt_bboxes,
+                                        "bbox_iou_count": int(iou_stats.get("count", 0) or 0),
+                                        "bbox_iou_per_object": iou_stats.get("per_object_iou", {}),
+                                        "bbox_iou_mean": iou_stats.get("mean"),
+                                        "pred_gripper": pred_gripper,
+                                        "gt_gripper": gt_gripper,
+                                        "gripper_distance": gripper_dist,
+                                        "text_rouge_l": {"whole": whole_score, **text_scores},
+                                    },
+                                )
 
                         # Normalize gripper action [0,1] -> [-1,+1] because the environment expects the latter
                         predicted_action = normalize_gripper_action(predicted_action, binarize=True)
@@ -874,6 +948,8 @@ def eval_libero(cfg: GenerateConfig) -> None:
             "metrics_camera_name": cfg.metrics_camera_name,
             "reasoning_trace_jsonl": cfg.reasoning_trace_jsonl,
             "reasoning_trace_jsonl_resolved": reasoning_trace_resolved,
+            "reasoning_step_metrics_jsonl": cfg.reasoning_step_metrics_jsonl,
+            "reasoning_step_metrics_jsonl_resolved": reasoning_step_metrics_resolved,
             "task_suite_name": cfg.task_suite_name,
             "model_family": cfg.model_family,
             "pretrained_checkpoint": str(cfg.pretrained_checkpoint),

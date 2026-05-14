@@ -491,29 +491,13 @@ def _gauß_on_bboxes(reasoning, sigma, folder_path=None, max_val=224):
 
         return f"{prefix}{str(objects_dict)}{suffix}"
 
-    # Replacement function for the GRIPPER POSITION list.
-    # Group 1 = prefix ("GRIPPER POSITION:" with optional whitespace/@),
-    # Group 2 = list payload.
-    def shift_gripper(match):
-        prefix = match.group(1)
-        list_str = match.group(2)
-        gripper_list = ast.literal_eval(list_str)
-        
-        if len(gripper_list) == 2:
-            new_x, new_y = apply_gauss_to_point(gripper_list[0], gripper_list[1])
-            gripper_list = [new_x, new_y]
-
-        return f"{prefix}{str(gripper_list)}"
-
     # Robust matching for slight formatting drift:
     # - optional whitespace around colon and '@'
     # - optional trailing '@' after dict
     # - stops before next CoT tag/end to avoid over-capture.
     visible_pattern = r"(VISIBLE OBJECTS:\s*@?\s*)(\{.*?\})(\s*@?)(?=\s*@?[A-Z ]+?:@?|$)"
-    gripper_pattern = r"(GRIPPER POSITION:\s*@?\s*)(\[.*?\])"
 
     updated_string, n_visible = re.subn(visible_pattern, shift_objects, reasoning, flags=re.DOTALL)
-    updated_string, _n_gripper = re.subn(gripper_pattern, shift_gripper, updated_string, flags=re.DOTALL)
 
     # Sanity check: if a reasoning trace mentions visible objects but no block matched,
     # warn once so failed corruption cannot go unnoticed.
@@ -783,10 +767,7 @@ def noise_all_modalities_dropout20_sigma20(reasoning):
     """
     Composite training-time perturbation used for all-modality noise training:
     - word dropout p=0.2 on plan/subtask/subtask_reasoning/move/move_reasoning
-    - Gaussian sigma=20 on visible objects and gripper position
-
-    Note: make_gaussian_bbox_noise(...) already perturbs both VISIBLE OBJECTS and
-    GRIPPER POSITION tags, so a separate gripper-only pass is not needed.
+    - Gaussian sigma=20 on visible objects
     """
     r = reasoning
     r = make_word_dropout(
@@ -804,7 +785,7 @@ def make_noise_all_modalities(
     """
     Build a composite perturbation:
     1) Word dropout on selected language fields
-    2) Gaussian bbox noise (also perturbs gripper in this codebase)
+    2) Gaussian noise on VISIBLE OBJECTS bboxes only
     """
     if word_dropout_keys is None:
         word_dropout_keys = ["plan", "subtask", "subtask_reasoning", "move", "move_reasoning"]
