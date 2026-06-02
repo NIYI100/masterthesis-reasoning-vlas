@@ -190,7 +190,16 @@ def get_vla_action(vla, obs, task_label, **kwargs):
     return action
 
 
-def get_minivla_action(vla, obs, task_label, reasoning_modifier_fn, center_crop=False, unnorm_key="libero_lm_90", **kwargs):
+def get_minivla_action(
+    vla,
+    obs,
+    task_label,
+    reasoning_modifier_fn,
+    forced_reasoning=None,
+    center_crop=False,
+    unnorm_key="libero_lm_90",
+    **kwargs,
+):
     """Generates an action with the VLA policy."""
 
     if not isinstance(obs["full_image"], list):
@@ -231,6 +240,7 @@ def get_minivla_action(vla, obs, task_label, reasoning_modifier_fn, center_crop=
         processed_images,
         task_label,
         reasoning_modifier_fn,
+        forced_reasoning=forced_reasoning,
         **kwargs
     )
     sequence = generated_ids[0].cpu().numpy()

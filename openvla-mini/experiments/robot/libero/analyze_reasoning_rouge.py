@@ -315,6 +315,61 @@ def _to_direct_key(record: dict[str, Any], step_offset: int) -> Optional[tuple[s
     return ep_path, demo_id, str(step_id)
 
 
+def _build_task_id_to_ep_path_map(
+    reasonings_by_ep: dict[str, Any],
+    libero_root: Path,
+    suite_name: str,
+) -> dict[int, str]:
+    """
+    Build deterministic task_id -> ep_path mapping from LIBERO task names.
+    Preferred key format in reasonings.json is: <task.name>_demo.hdf5
+    """
+    try:
+        sys.path.append(str(libero_root))
+        from libero.libero import benchmark  # type: ignore
+    except Exception:
+        return {}
+
+    try:
+        suite_cls = benchmark.get_benchmark_dict()[suite_name]
+        suite = suite_cls()
+    except Exception:
+        return {}
+
+    # Fast exact lookup over reasonings keys.
+    available_eps = set(reasonings_by_ep.keys())
+    out: dict[int, str] = {}
+    for task_id in range(int(getattr(suite, "n_tasks", 0))):
+        task = suite.get_task(task_id)
+        expected_ep = f"{task.name}_demo.hdf5"
+        if expected_ep in available_eps:
+            out[int(task_id)] = expected_ep
+    return out
+
+
+def _to_inferred_direct_key(
+    record: dict[str, Any],
+    task_id_to_ep_path: dict[int, str],
+    step_offset: int,
+) -> Optional[tuple[str, str, str]]:
+    """
+    Infer (ep_path, demo_id, step) from task_id/episode_idx/env_step when explicit direct keys
+    are absent in trace rows.
+    """
+    task_id = _as_nonneg_int(record.get("task_id"))
+    episode_idx = _as_nonneg_int(record.get("episode_idx"))
+    env_step = _as_nonneg_int(record.get("env_step"))
+    if task_id is None or episode_idx is None or env_step is None:
+        return None
+    ep_path = task_id_to_ep_path.get(task_id)
+    if ep_path is None:
+        return None
+    step = env_step + int(step_offset)
+    if step < 0:
+        return None
+    return ep_path, str(episode_idx), str(step)
+
+
 def _task_name_match(task_name: str, ep_path_task_name: str) -> bool:
     t1 = _normalize_task_text(task_name)
     t2 = _normalize_task_text(ep_path_task_name)
@@ -463,6 +518,12 @@ def main() -> None:
         needed_ep_paths if not fallback_needed_task_ids else None,
     )
 
+    task_id_to_ep_path = _build_task_id_to_ep_path_map(
+        reasonings_by_ep,
+        libero_root=Path(args.libero_root).resolve(),
+        suite_name=args.task_suite_name,
+    )
+
     fallback_episode_map: dict[int, list[tuple[str, str]]] = {}
     if fallback_needed_task_ids:
         task_names_by_id = _task_names_from_trace_rows(rows, fallback_needed_task_ids)
@@ -486,6 +547,8 @@ def main() -> None:
     matched = 0
     unmatched = 0
     direct_matched = 0
+    direct_explicit_matched = 0
+    direct_inferred_matched = 0
     fallback_matched = 0
     unmatched_reasons: dict[str, int] = {}
     sample_rows_out: list[dict[str, Any]] = []
@@ -493,6 +556,13 @@ def main() -> None:
     for idx, (trace_path, line_no, row) in enumerate(rows):
         key = _to_direct_key(row, step_offset=args.step_offset)
         mode = "direct"
+        if key is None:
+            key = _to_inferred_direct_key(
+                row,
+                task_id_to_ep_path=task_id_to_ep_path,
+                step_offset=args.step_offset,
+            )
+            mode = "direct_inferred"
         if key is None:
             key = _to_fallback_key(row, fallback_episode_map, step_offset=args.step_offset)
             mode = "fallback"
@@ -526,6 +596,10 @@ def main() -> None:
         matched += 1
         if mode == "direct":
             direct_matched += 1
+            direct_explicit_matched += 1
+        elif mode == "direct_inferred":
+            direct_matched += 1
+            direct_inferred_matched += 1
         else:
             fallback_matched += 1
 
@@ -581,6 +655,8 @@ def main() -> None:
         "rows_matched": matched,
         "rows_unmatched": unmatched,
         "rows_matched_direct": direct_matched,
+        "rows_matched_direct_explicit": direct_explicit_matched,
+        "rows_matched_direct_inferred": direct_inferred_matched,
         "rows_matched_fallback": fallback_matched,
         "unmatched_reasons": unmatched_reasons,
         "rouge_l": _compute_summary_payload(stats),

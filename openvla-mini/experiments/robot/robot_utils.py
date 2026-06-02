@@ -83,7 +83,15 @@ def get_image_resize_size(cfg):
     return resize_size
 
 
-def get_action(cfg, model, obs, task_label, reasoning_modifier_fn: Optional[callable] = None, processor=None):
+def get_action(
+    cfg,
+    model,
+    obs,
+    task_label,
+    reasoning_modifier_fn: Optional[callable] = None,
+    forced_reasoning: Optional[str] = None,
+    processor=None,
+):
     """Queries the model to get an action. Returns (action, reasoning, clean_reasoning_or_none)."""
     reasoning = ""
     clean_reasoning = None
@@ -99,7 +107,13 @@ def get_action(cfg, model, obs, task_label, reasoning_modifier_fn: Optional[call
         assert action.shape == (ACTION_DIM,)
     elif cfg.model_family == "minivla":
         action, reasoning, clean_reasoning = get_minivla_action(
-            model, obs, task_label, reasoning_modifier_fn, center_crop=cfg.center_crop, unnorm_key=cfg.unnorm_key
+            model,
+            obs,
+            task_label,
+            reasoning_modifier_fn,
+            forced_reasoning=forced_reasoning,
+            center_crop=cfg.center_crop,
+            unnorm_key=cfg.unnorm_key,
         )
 
         assert action.shape == (ACTION_DIM,) or action.shape == (10, ACTION_DIM)

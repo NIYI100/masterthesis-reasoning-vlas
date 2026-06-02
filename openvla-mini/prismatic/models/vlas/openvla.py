@@ -112,6 +112,7 @@ class OpenVLA(PrismaticVLM):
         image: Union[Img, List[Img]],
         instruction: str,
         reasoning_modifier_fn,
+        forced_reasoning: Optional[str] = None,
         unnorm_key: Optional[str] = None, **kwargs: str
     ) -> Tuple[torch.Tensor, Optional[str]]:
         """
@@ -155,8 +156,15 @@ class OpenVLA(PrismaticVLM):
         injected_reasoning = None
         clean_reasoning_for_metrics: Optional[str] = None
 
+        if forced_reasoning is not None and reasoning_modifier_fn:
+            raise ValueError("Provide either forced_reasoning or reasoning_modifier_fn, not both.")
+
+        # Inject externally provided reasoning verbatim for counterfactual pass-2.
+        if forced_reasoning is not None:
+            injected_reasoning = f"{str(forced_reasoning).strip()} ACTION:"
+            clean_reasoning_for_metrics = str(forced_reasoning)
         # Change the reasoning with some function
-        if reasoning_modifier_fn:
+        elif reasoning_modifier_fn:
             with torch.autocast("cuda", dtype=autocast_dtype, enabled=self.enable_mixed_precision_training):
                 temp_generated_ids = super(PrismaticVLM, self).generate(
                     input_ids=input_ids, pixel_values=pixel_values, max_new_tokens=1024, **kwargs
