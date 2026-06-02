@@ -144,20 +144,53 @@ The repository uses one string flag:
 
 This works in **both** training and evaluation.
 
-Common examples:
+Perturbations used in your experiments (generic form -> example):
 
-- no perturbation: `None`
-- ablation (generic form): `ablate:<TAG1>,<TAG2>,...`
-  - ablation (all supported tags): `ablate:plan,visible_objects,subtask_reasoning,subtask,move_reasoning,move,gripper`
-  - ablation example (keep only move): `ablate:plan,visible_objects,subtask_reasoning,subtask,move_reasoning,gripper`
-- bbox Gaussian noise: `gaussian_bbox_sigma:15`
-- gripper-only noise: `gaussian_gripper_sigma:10`
-- word dropout: `word_dropout:0.3`
-  - word dropout for specific modalities: `noise_text_subset:0.4:subtask,move_reasoning,move`
-- compositional text+bbox noise: `noise_all_modalities:10:0.3`
-- sentence shuffle: `sentence_shuffle`
-- motion inversion: `invert_motion_phrases`
-- no reasoning baseline: `no_reasoning`
+- No perturbation:
+  - Generic: `None`
+  - Example: `None`
+- Modality ablation:
+  - Generic: `ablate:<TAG1>,<TAG2>,...`
+  - Example: `ablate:plan,visible_objects,subtask_reasoning,subtask,move_reasoning,gripper`
+- No-reasoning baseline:
+  - Generic: `no_reasoning`
+  - Example: `no_reasoning`
+- BBox Gaussian noise:
+  - Generic: `gaussian_bbox_sigma:<SIGMA>`
+  - Example: `gaussian_bbox_sigma:20`
+- Gripper Gaussian noise:
+  - Generic: `gaussian_gripper_sigma:<SIGMA>`
+  - Example: `gaussian_gripper_sigma:50`
+- Word dropout (field-specific):
+  - Generic: `word_dropout:<P>:<FIELD>`
+  - Example: `word_dropout:0.3:move`
+- Text-subset dropout:
+  - Generic: `noise_text_subset:<P>:<FIELD1,FIELD2,...>`
+  - Example: `noise_text_subset:0.3:subtask,move_reasoning,move`
+- Combined bbox + text dropout:
+  - Generic: `noise_all_modalities:<SIGMA>:<P>[:FIELD1,FIELD2,...]`
+  - Example: `noise_all_modalities:20:0.3:subtask,move_reasoning,move`
+- Temporal combined noise:
+  - Generic: `temporal_noise_all_modalities_prob:<PHASE>:<SIGMA>:<P_DROPOUT>:<APPLY_P>:<EARLY_END>:<MIDDLE_END>:<LATE_END>`
+  - Example: `temporal_noise_all_modalities_prob:early:20:0.3:0.4:0.4:0.6:1.0`
+- Sentence shuffle:
+  - Generic: `sentence_shuffle[:FIELD1,FIELD2,...]`
+  - Example: `sentence_shuffle:move_reasoning`
+- Plan-step shuffle:
+  - Generic: `plan_step_shuffle`
+  - Example: `plan_step_shuffle`
+- Subtask shuffle alias:
+  - Generic: `shuffle_subtask`
+  - Example: `shuffle_subtask`
+- Motion inversion:
+  - Generic: `invert_motion_phrases[:FIELD1,FIELD2,...]`
+  - Example: `invert_motion_phrases:move`
+- Probabilistic motion inversion:
+  - Generic: `invert_motion_phrases_prob:<P>[:FIELD1,FIELD2,...]`
+  - Example: `invert_motion_phrases_prob:0.3:move`
+- Knowledge-index trace mode:
+  - Generic: `knowledge_index_trace`
+  - Example: `knowledge_index_trace`
 
 All implemented modifiers are defined in:
 
