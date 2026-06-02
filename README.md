@@ -1,48 +1,24 @@
 # Masterthesis Reasoning VLAs
 
 This repository is prepared for **using the OpenVLA-mini workflow** with reasoning:
+
 - train models,
 - evaluate models,
 - perturb reasoning during training or evaluation.
 
-Plotting and thesis-specific analysis are not part of the core workflow.
-
 ## Project Scope
 
 Use this folder as main entry point:
+
 - `openvla-mini/`
 
 Core files:
+
 - training: `openvla-mini/vla-scripts/train.py`
 - evaluation: `openvla-mini/experiments/robot/libero/run_libero_eval.py`
 - reasoning perturbations: `openvla-mini/prismatic/util/reasoning_manipulation.py`
 
-## Quick Start
 
-```bash
-cd openvla-mini
-pip install -e .
-```
-
-If your setup needs extra robot/eval dependencies, follow the notes in `openvla-mini/README.md`.
-
-## Training Parameters You Set
-
-These are the user-controlled parameters used in your training setup (`train_config.yaml` + sbatch overrides):
-
-- `--nnodes`: number of compute nodes for distributed training.
-- `--nproc-per-node`: number of GPU worker processes per node.
-- `--rdzv_id`: rendezvous job id used to coordinate all workers.
-- `--rdzv_backend`: rendezvous backend (`c10d` in your setup).
-- `--rdzv_endpoint`: master address and port for rendezvous.
-- `--config_path`: base YAML config file (`train_config.yaml`).
-- `--vla.type`: model/training recipe identifier.
-- `--data_root_dir`: root folder for training data.
-- `--run_root_dir`: root folder where runs/checkpoints are saved.
-- `--wandb_project`: Weights & Biases project name.
-- `--wandb_entity`: Weights & Biases entity/team name.
-- `--reasoning_modifier_fn_str`: reasoning perturbation method (or `None`).
-- `--run_id_note`: short suffix appended to run id for experiment tracking.
 
 ### Training command (full parameterized template)
 
@@ -65,11 +41,74 @@ torchrun \
   --run_id_note "<RUN_TAG>"
 ```
 
+## Training Parameters
+
+These are the user-controlled parameters used in the training setup:
+
+- `--nnodes`: number of compute nodes for distributed training.
+- `--nproc-per-node`: number of GPU worker processes per node.
+- `--rdzv_id`: rendezvous job id used to coordinate all workers.
+- `--rdzv_backend`: rendezvous backend (`c10d` in my setup).
+- `--rdzv_endpoint`: master address and port for rendezvous.
+- `--config_path`: base YAML config file (`train_config.yaml`).
+  - CLI parameters can be used too
+- `--vla.type`: model/training recipe identifier.
+- `--data_root_dir`: root folder for training data.
+- `--run_root_dir`: root folder where runs/checkpoints are saved.
+- `--wandb_project`: Weights & Biases project name.
+- `--wandb_entity`: Weights & Biases entity/team name.
+- `--reasoning_modifier_fn_str`: reasoning perturbation method (or `None`).
+- `--run_id_note`: short suffix appended to run id for experiment tracking.
+
 Example values from your current setup:
+
 - `<VLA_TYPE>`: `prism-qwen25-dinosiglip-224px+0_5b+mx-libero-lm-90`
 - `<REASONING_MODIFIER_OR_None>`: `None` or `ablate:plan,visible_objects,subtask_reasoning,subtask,move_reasoning,gripper`
 
-## Evaluation Parameters You Set
+### Evaluation command (parallel execution)
+
+```bash
+cd openvla-mini
+python experiments/robot/libero/launch_parallel_libero_eval.py \
+  --rollout_dir_name "<ROLLOUT_DIR_NAME>" \
+  --gpus_per_node "<NUM_GPUS>" \
+  --workers_per_gpu "<WORKERS_PER_GPU>" \
+  --base_seed "<BASE_SEED>" \
+  -- \
+  --task_suite_name "<TASK_SUITE_NAME>" \
+  --local_log_dir "<PATH_TO_LOG_DIR>" \
+  --num_trials_per_task "<NUM_TRIALS_PER_TASK>" \
+  --pretrained_checkpoint "<PATH_TO_CHECKPOINT>" \
+  --run_id_note "<RUN_TAG>" \
+  --reasoning_modifier_fn_str "<REASONING_MODIFIER_OR_None>" \
+  --experiment_type "<EXPERIMENT_TYPE>" \
+  --perturbation_type "<PERTURBATION_TYPE>" \
+  --perturbation_level "<PERTURBATION_LEVEL>" \
+  --noise_sigma "<NOISE_SIGMA>"
+```
+
+### Evaluation command (normal, non-parallel execution)
+
+Use this when you want a single-process run without `launch_parallel_libero_eval.py`:
+
+```bash
+cd openvla-mini
+python experiments/robot/libero/run_libero_eval.py \
+  --model_family "<MODEL_FAMILY>" \
+  --pretrained_checkpoint "<PATH_TO_CHECKPOINT>" \
+  --task_suite_name "<TASK_SUITE_NAME>" \
+  --num_trials_per_task "<NUM_TRIALS_PER_TASK>" \
+  --seed "<SEED>" \
+  --local_log_dir "<PATH_TO_LOG_DIR>" \
+  --run_id_note "<RUN_TAG>" \
+  --reasoning_modifier_fn_str "<REASONING_MODIFIER_OR_None>" \
+  --experiment_type "<EXPERIMENT_TYPE>" \
+  --perturbation_type "<PERTURBATION_TYPE>" \
+  --perturbation_level "<PERTURBATION_LEVEL>" \
+  --noise_sigma "<NOISE_SIGMA>"
+```
+
+## Evaluation Parameters
 
 These are the user-controlled parameters used in your evaluation sbatch scripts:
 
@@ -83,81 +122,45 @@ These are the user-controlled parameters used in your evaluation sbatch scripts:
 - `--pretrained_checkpoint`: checkpoint file to evaluate.
 - `--run_id_note`: experiment tag stored in logs/metrics.
 - `--reasoning_modifier_fn_str`: reasoning perturbation method (or `None`).
-- `--experiment_type`: high-level label (for example `noise_text`, `ablation`, `vanilla`).
-- `--perturbation_type`: perturbation family label (for example `word_dropout`, `invert_motion_prob`).
-- `--perturbation_level`: perturbation intensity label (for example `p30_move`).
-- `--noise_sigma`: numeric perturbation strength metadata value.
+- logs:
+  - `--experiment_type`: high-level label (for example `noise_text`, `ablation`, `vanilla`).
+  - `--perturbation_type`: perturbation family label (for example `word_dropout`, `invert_motion_prob`).
+  - `--perturbation_level`: perturbation intensity label (for example `p30_move`).
+  - `--noise_sigma`: numeric perturbation strength metadata value.
 
-### Evaluation command (full parameterized template)
 
-```bash
-cd openvla-mini
-python experiments/robot/libero/launch_parallel_libero_eval.py \
-  --rollout_dir_name "<ROLLOUT_DIR_NAME>" \
-  --gpus_per_node <NUM_GPUS> \
-  --workers_per_gpu <WORKERS_PER_GPU> \
-  --base_seed <BASE_SEED> \
-  -- \
-  --task_suite_name "<TASK_SUITE_NAME>" \
-  --local_log_dir "<PATH_TO_LOG_DIR>" \
-  --num_trials_per_task <NUM_TRIALS_PER_TASK> \
-  --pretrained_checkpoint "<PATH_TO_CHECKPOINT>" \
-  --run_id_note "<RUN_TAG>" \
-  --reasoning_modifier_fn_str "<REASONING_MODIFIER_OR_None>" \
-  --experiment_type "<EXPERIMENT_TYPE>" \
-  --perturbation_type "<PERTURBATION_TYPE>" \
-  --perturbation_level "<PERTURBATION_LEVEL>" \
-  --noise_sigma <NOISE_SIGMA>
-```
-
-### Evaluation command (normal, non-parallel)
-
-Use this when you want a single-process run without `launch_parallel_libero_eval.py`:
-
-```bash
-cd openvla-mini
-python experiments/robot/libero/run_libero_eval.py \
-  --model_family "<MODEL_FAMILY>" \
-  --pretrained_checkpoint "<PATH_TO_CHECKPOINT>" \
-  --task_suite_name "<TASK_SUITE_NAME>" \
-  --num_trials_per_task <NUM_TRIALS_PER_TASK> \
-  --seed <SEED> \
-  --local_log_dir "<PATH_TO_LOG_DIR>" \
-  --run_id_note "<RUN_TAG>" \
-  --reasoning_modifier_fn_str "<REASONING_MODIFIER_OR_None>" \
-  --experiment_type "<EXPERIMENT_TYPE>" \
-  --perturbation_type "<PERTURBATION_TYPE>" \
-  --perturbation_level "<PERTURBATION_LEVEL>" \
-  --noise_sigma <NOISE_SIGMA>
-```
 
 Examples from your current setup:
+
 - vanilla: `--reasoning_modifier_fn_str None --experiment_type vanilla --perturbation_type none --perturbation_level none --noise_sigma 0`
 - word dropout: `--reasoning_modifier_fn_str "word_dropout:0.3:move" --experiment_type noise_text --perturbation_type word_dropout --perturbation_level p30_move --noise_sigma 0.3`
 - invert-motion prob: `--reasoning_modifier_fn_str "invert_motion_phrases_prob:0.3:move" --experiment_type noise_text --perturbation_type invert_motion_prob --perturbation_level p30_move --noise_sigma 0.3`
 
-## Reasoning Perturbation (Easy Overview)
+## Reasoning Perturbations
 
 The repository uses one string flag:
+
 - `--reasoning_modifier_fn_str`
 
 This works in **both** training and evaluation.
 
 Common examples:
+
 - no perturbation: `None`
 - ablation (generic form): `ablate:<TAG1>,<TAG2>,...`
-- ablation (all supported tags): `ablate:plan,visible_objects,subtask_reasoning,subtask,move_reasoning,move,gripper`
-- ablation example (keep only move): `ablate:plan,visible_objects,subtask_reasoning,subtask,move_reasoning,gripper`
+  - ablation (all supported tags): `ablate:plan,visible_objects,subtask_reasoning,subtask,move_reasoning,move,gripper`
+  - ablation example (keep only move): `ablate:plan,visible_objects,subtask_reasoning,subtask,move_reasoning,gripper`
 - bbox Gaussian noise: `gaussian_bbox_sigma:15`
 - gripper-only noise: `gaussian_gripper_sigma:10`
 - word dropout: `word_dropout:0.3`
-- text subset dropout: `noise_text_subset:0.4:subtask,move_reasoning,move`
+  - word dropout for specific modalities: `noise_text_subset:0.4:subtask,move_reasoning,move`
 - compositional text+bbox noise: `noise_all_modalities:10:0.3`
 - sentence shuffle: `sentence_shuffle`
 - motion inversion: `invert_motion_phrases`
 - no reasoning baseline: `no_reasoning`
 
 All implemented modifiers are defined in:
+
 - `openvla-mini/prismatic/util/reasoning_manipulation.py`
 
 ## Where perturbation is applied
@@ -172,7 +175,3 @@ All implemented modifiers are defined in:
 3. Register it in `get_reasoning_fn(...)`.
 4. Call it from CLI via `--reasoning_modifier_fn_str "<your_modifier_name>"`.
 
-## Notes
-
-- Keep your run config and dependency versions fixed for reproducibility.
-- For model-specific details and broader upstream OpenVLA docs, see `openvla-mini/README.md`.
