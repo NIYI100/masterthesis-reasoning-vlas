@@ -687,8 +687,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
                     if action.shape == (1, 7):
                         action = [action]
                     for action_idx_in_forward, predicted_action in enumerate(action):
-                        #print(f"{reasoning} ACTION: {predicted_action}")
-                        #TODO - for loop für mehrere actions
+                        # Handle one metric/update step per predicted action (supports action chunking outputs).
                         if cfg.enable_reasoning_metrics and isinstance(reasoning, str):
                             # Collect one metric sample per executed action (important for chunked action outputs).
                             gt_bboxes = extract_gt_bboxes_from_obs(env, obs, camera_name=cfg.metrics_camera_name)

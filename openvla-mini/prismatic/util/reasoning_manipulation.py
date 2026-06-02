@@ -1094,14 +1094,3 @@ def update_running_sigma(folder_path, target_sigma, actual_dx, actual_dy):
         json.dump(state, f, indent=4)
         
     return state["real_sigma_x"], state["real_sigma_y"]
-
-# TODO - Eigentlich sollte jetzt
-if __name__ == "__main__":
-    log_filepath = "./shifts_sigma50.jsonl"
-    target_sigma = 50
-    initialize_shift_log(log_filepath, target_sigma)
-    reasoning_output = "VISIBLE OBJECTS:@{'apple': [[0, 5], [150, 150]]}@ GRIPPER POSITION:@[100, 0]"
-    altered_reasoning = _gauß_on_bboxes(reasoning_output, target_sigma, log_filepath)
-    print(reasoning_output)
-    print(altered_reasoning)
-    print(calculate_real_sigma_from_log(log_filepath))
