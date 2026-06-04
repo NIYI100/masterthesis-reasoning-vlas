@@ -54,7 +54,7 @@ _OBJECT_REL_PATTERNS = (
     "_to_the_back_of_the_",
     "_under_the_",
 )
-_DEFAULT_TASK_ROLLOUTS_CSV = Path("/home/hk-project-p0024638/uvrfq/libero_reasonings_task_rollouts.csv")
+_DEFAULT_TASK_ROLLOUTS_CSV = Path("./default_task_rollouts.csv")
 
 
 def _split_scene_and_rest(task_name: str) -> Tuple[str, str]:

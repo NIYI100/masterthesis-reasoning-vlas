@@ -203,19 +203,6 @@ class RLDSDataset(IterableDataset):
         # Initialize RLDS Dataset
         self.dataset, self.dataset_length, self.dataset_statistics = self.make_dataset(rlds_config)
 
-        #TODO - Neu
-        # --- ADD THIS SHARDING LOGIC ---
-        #if dist.is_initialized() and dist.get_world_size() > 1:
-        #    world_size = dist.get_world_size()
-        #    rank = dist.get_rank()
-            
-            # Use TensorFlow's native sharding to split the dataset
-        #    self.dataset = self.dataset.shard(num_shards=world_size, index=rank)
-            
-            # (Optional) Update the dataset length estimate for logging
-        #    self.dataset_length = self.dataset_length // world_size
-        # -------------------------------
-
     def make_dataset(self, rlds_config):
         return make_interleaved_dataset(**rlds_config)
 
