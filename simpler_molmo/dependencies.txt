@@ -1,9 +1,0 @@
-matplotlib
-mediapy
-tensorflow
-torch
-transformers
-vllm
-einops
-torchvision
-accelerate
